@@ -1,0 +1,20 @@
+{
+  "name": "loopweave-visible-bridge",
+  "version": "0.1.0",
+  "description": "Exactly-once same-task visible review bridge for LoopWeave",
+  "author": {
+    "name": "LoopWeave contributors"
+  },
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "LoopWeave Visible Bridge",
+    "shortDescription": "Deliver reviews into one bound visible task.",
+    "longDescription": "Local model-free bridge that leases a pending LoopWeave review and delivers it exactly once into the currently bound visible Codex task. It never creates a hidden reviewer or replacement worker.",
+    "developerName": "LoopWeave",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": "Open the LoopWeave visible review bridge status."
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "name": "loopweave-local",
+  "interface": {
+    "displayName": "LoopWeave Local Development"
+  },
+  "plugins": [
+    {
+      "name": "loopweave-visible-bridge",
+      "source": {
+        "source": "local",
+        "path": "./plugins/loopweave-visible-bridge"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LoopWeave Visible Review Bridge</title>
+  <style>
+    :root { color-scheme: light dark; font-family: ui-sans-serif, system-ui, sans-serif; }
+    body { margin: 0; padding: 10px 12px; }
+    main { align-items: center; display: flex; gap: 8px; min-height: 24px; }
+    #dot { background: #8a8f98; border-radius: 50%; height: 7px; width: 7px; }
+    #dot.ready { background: #32a852; }
+    #dot.blocked { background: #d18b20; }
+    #dot.error { background: #d64545; }
+    #state { font-size: 12px; opacity: 0.82; }
+  </style>
+</head>
+<body>
+  <main aria-live="polite">
+    <span id="dot"></span>
+    <span id="state">LoopWeave bridge starting...</span>
+  </main>
+  <script>
+    const state = document.querySelector("#state");
+    const dot = document.querySelector("#dot");
+    let stopped = false;
+    let pollInFlight = false;
+    let retryDelayMs = 500;
+
+    function setState(text, tone = "") {
+      state.textContent = text;
+      dot.className = tone;
+    }
+
+    function unwrap(result) {
+      if (result && result.structuredContent) return result.structuredContent;
+      if (result && result.result && result.result.structuredContent) {
+        return result.result.structuredContent;
+      }
+      const text = result && result.content && result.content[0] && result.content[0].text;
+      if (typeof text === "string") {
+        try { return JSON.parse(text); } catch (_) { return result; }
+      }
+      return result;
+    }
+
+    async function callTool(name, args = {}) {
+      if (!window.openai || typeof window.openai.callTool !== "function") {
+        throw new Error("host_tool_bridge_unavailable");
+      }
+      return unwrap(await window.openai.callTool(name, args));
+    }
+
+    function sleep(ms) {
+      return new Promise((resolve) => window.setTimeout(resolve, ms));
+    }
+
+    async function poll() {
+      if (pollInFlight || stopped) return;
+      pollInFlight = true;
+      try {
+        if (document.visibilityState !== "visible") {
+          setState("Bridge paused while this task is hidden.");
+          return;
+        }
+        const result = await callTool("wait_for_review", { timeout_ms: 15000 });
+        retryDelayMs = 500;
+        if (result.status === "queued") {
+          setState("Opening queued review in this task...", "ready");
+          const delivered = await callTool("resume_visible_delivery", {});
+          if (delivered.status === "visible") {
+            setState("Visible review is in progress.", "ready");
+          } else if (delivered.status === "active") {
+            setState("Bridge waiting for this task to become idle.");
+          } else {
+            setState("Review queued for Desktop delivery.", "blocked");
+          }
+        } else if (result.status === "dispatching") {
+          setState("Desktop is opening the queued review.", "ready");
+        } else if (result.status === "ambiguous") {
+          setState("Multiple reviews pending; selection required.", "blocked");
+        } else if (result.status === "identity_rejected") {
+          setState("Bridge binding does not match this task.", "error");
+          stopped = true;
+        } else if (result.status === "unbound") {
+          setState("Bridge is waiting for an explicit task binding.", "blocked");
+          retryDelayMs = Math.min(retryDelayMs * 2, 10000);
+        } else if (result.status === "active") {
+          setState("Bridge waiting for this task to become idle.");
+        } else if (result.status === "visible" || result.status === "reviewing") {
+          setState("Visible review is in progress.", "ready");
+        } else {
+          setState("Bridge armed for visible reviews.", "ready");
+        }
+      } catch (_) {
+        setState("Bridge reconnecting...", "blocked");
+        retryDelayMs = Math.min(retryDelayMs * 2, 10000);
+      } finally {
+        pollInFlight = false;
+        if (!stopped) {
+          await sleep(retryDelayMs);
+          void poll();
+        }
+      }
+    }
+
+    document.addEventListener("visibilitychange", () => {
+      if (!stopped && document.visibilityState === "visible") void poll();
+    });
+    window.addEventListener("pagehide", () => { stopped = true; }, { once: true });
+    void poll();
+  </script>
+</body>
+</html>

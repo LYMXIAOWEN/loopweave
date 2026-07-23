@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "loopweave"
+version = "0.1.0.dev0"
+description = "面向 Codex 桌面端的开放式终端 AI Agent 协作与审查循环"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+desktop = [
+  "mcp==1.27.0",
+]
+dev = [
+  "mcp==1.27.0",
+  "pytest>=8",
+  "ruff>=0.8",
+]
+
+[project.scripts]
+loopweave = "loopweave.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
