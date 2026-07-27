@@ -20,6 +20,7 @@ def test_install_reuses_configured_marketplace_and_adds_plugin(tmp_path: Path):
     calls = []
     responses = [
         json.dumps({"marketplaces": [{"name": "loopweave-local"}]}),
+        json.dumps({"installed": []}),
         json.dumps({"pluginId": "loopweave-visible-bridge@loopweave-local"}),
     ]
     manager = BridgePluginManager(
@@ -31,8 +32,10 @@ def test_install_reuses_configured_marketplace_and_adds_plugin(tmp_path: Path):
     result = manager.install()
 
     assert result["installed"] is True
+    assert result["refreshed"] is False
     assert calls == [
         ["/opt/codex", "plugin", "marketplace", "list", "--json"],
+        ["/opt/codex", "plugin", "list", "--json"],
         [
             "/opt/codex",
             "plugin",
@@ -48,6 +51,7 @@ def test_install_adds_missing_marketplace_before_plugin(tmp_path: Path):
     responses = [
         json.dumps({"marketplaces": []}),
         json.dumps({"name": "loopweave-local"}),
+        json.dumps({"installed": []}),
         json.dumps({"pluginId": "loopweave-visible-bridge@loopweave-local"}),
     ]
     manager = BridgePluginManager(
@@ -65,6 +69,50 @@ def test_install_adds_missing_marketplace_before_plugin(tmp_path: Path):
         "add",
         str(tmp_path),
         "--json",
+    ]
+
+
+def test_install_refreshes_existing_plugin_cache(tmp_path: Path):
+    calls = []
+    responses = [
+        json.dumps({"marketplaces": [{"name": "loopweave-local"}]}),
+        json.dumps(
+            {
+                "installed": [
+                    {
+                        "pluginId": "loopweave-visible-bridge@loopweave-local",
+                        "installed": True,
+                    }
+                ]
+            }
+        ),
+        json.dumps({"removed": True}),
+        json.dumps({"pluginId": "loopweave-visible-bridge@loopweave-local"}),
+    ]
+    manager = BridgePluginManager(
+        codex_bin=Path("/opt/codex"),
+        marketplace_root=tmp_path,
+        runner=_runner(responses, calls),
+    )
+
+    result = manager.install()
+
+    assert result["refreshed"] is True
+    assert calls[-2:] == [
+        [
+            "/opt/codex",
+            "plugin",
+            "remove",
+            "loopweave-visible-bridge@loopweave-local",
+            "--json",
+        ],
+        [
+            "/opt/codex",
+            "plugin",
+            "add",
+            "loopweave-visible-bridge@loopweave-local",
+            "--json",
+        ],
     ]
 
 

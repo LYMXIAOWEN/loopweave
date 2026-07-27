@@ -32,6 +32,16 @@ class ReviewBackend(str, Enum):
     VISIBLE_THREAD = "visible-thread"
 
 
+class StorageState(str, Enum):
+    HOT = "hot"
+    ARCHIVING = "archiving"
+    ARCHIVED = "archived"
+    TRASH = "trash"
+    LEDGER_ONLY = "ledger_only"
+    PURGED = "purged"
+    RECOVERY_REQUIRED = "recovery_required"
+
+
 TERMINAL_STATES = {
     RunState.APPROVED,
     RunState.NEEDS_HUMAN,
@@ -82,6 +92,25 @@ class ThreadBinding:
     attached_at: str
     detached_at: Optional[str] = None
     detach_reason: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class RunStorageRecord:
+    run_id: str
+    storage_state: StorageState = StorageState.HOT
+    pinned: bool = False
+    pin_reason: Optional[str] = None
+    archive_path: Optional[str] = None
+    archive_sha256: Optional[str] = None
+    archive_size: Optional[int] = None
+    archived_at: Optional[str] = None
+    trash_path: Optional[str] = None
+    trashed_at: Optional[str] = None
+    ledger_path: Optional[str] = None
+    policy_version: str = "1"
+    generation: int = 1
+    last_transition_at: Optional[str] = None
+    recovery_note: Optional[str] = None
 
 
 @dataclass(frozen=True)

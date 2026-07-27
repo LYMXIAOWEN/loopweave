@@ -36,12 +36,17 @@ LoopWeave 仍处于 **pre-alpha** 阶段，适合开发者试用和共同完善�
 - `loopweave run <agent>` 可以启动任意位于 `PATH` 中的终端 CLI；未知名称自动
   走通用适配器，不会因为厂商名称被拒绝。
 - `--task-file <path>` 可以在启动时安装当前 run 专属的任务包；也可以先启动，
-  再通过 `loopweave assign` 派发。
+  再通过 `loopweave assign` 派发。右侧终端重连时，可以用
+  `--continue-run <run-id>` 从经过兼容性校验的历史 run 延续同一任务。首次
+  派发和续跑都会等待终端输出进入稳定期后再发送，避免 TUI 初始化吞掉早到输入。
 - Agent 可以统一使用 `loopweave submit --stage`、`--final` 或
   `--needs-human` 提交结果，不依赖 Claude 专属 Hook。
 - Codex Desktop 可见审查链路已经通过真实终端验证：阶段提交、审查、
   `changes_requested` 自动发送、同 PID 继续执行、最终提交能够形成完整闭环。
 - 运行存活检查、误判孤立恢复和任务来源都有受约束的审计记录。
+- `runs`、`archive`、`restore`、`pin`、`gc` 与每日一次的短生命周期维护任务，
+  共同管理热 Run、可恢复归档、审计账本和延迟删除区；活跃、待审查、人工待处理
+  和身份不确定的 Run 默认受保护。
 - 核心模块在缺少 POSIX 模块的平台上可以安全导入，终端宿主已经抽象为独立平台
   边界。
 
@@ -145,8 +150,51 @@ Agent 完成全部任务后提交最终结果：
 loopweave submit --final --summary-file final.md
 ```
 
+如果任务包已经原子安装，但旧版本或特殊 Agent 的启动界面清除了输入，可以在
+确认右侧终端已经就绪后重投同一份任务：
+
+```bash
+loopweave assign \
+  --run-id <run-id> \
+  --task-file /absolute/path/to/task.md \
+  --redeliver
+```
+
+重投只接受与已绑定任务相同的 SHA-256，不会覆盖任务来源。
+
 全部命令、参数、状态要求和示例见
 [《LoopWeave 命令参考》](docs/CLI_REFERENCE.md)。
+
+## Run 生命周期治理
+
+LoopWeave 将工作流状态与数据存储状态分开管理。运行数据默认位于
+`~/.codex/loopweave`：
+
+```text
+runs/          当前可直接使用的热 Run
+archives/      带清单和 SHA-256 的可恢复归档
+ledger/        有界长期审计账本
+trash/         处于宽限期、尚未永久删除的原目录
+maintenance/   GC 计划、最近结果和维护日志
+var/           注册表、锁和短期控制文件
+```
+
+先查看逐 Run 决策，再应用同一份持久化计划：
+
+```bash
+loopweave runs --all
+loopweave gc --dry-run
+loopweave gc --apply
+```
+
+`gc --apply` 会拒绝已经发生状态漂移的计划。未登记目录、活进程、身份不确定、
+待审查、`needs_human`、所有者待处理、被引用或被 `pin` 的 Run 均不会自动处理。
+归档成功后原目录先进入 `trash/`，默认保留 7 天；归档可用
+`loopweave restore <run-id>` 恢复。
+
+保留策略由 `~/.config/loopweave/config.toml` 管理。完整操作手册见
+[《Run 运维手册》](docs/OPERATIONS.md)，任务重连与数据迁移见
+[《迁移与恢复》](docs/MIGRATION_AND_RECOVERY.md)。
 
 ## 设计原则
 
@@ -167,8 +215,9 @@ bin/        源码检出环境下的启动脚本
 docs/       架构、命令参考、开发说明与决策记录
 ```
 
-运行数据默认位于被忽略的 `projects/`、`runs/` 和 `var/` 目录。可以通过
-`LOOPWEAVE_HOME` 把运行状态放到其他位置。
+运行数据不会写入源码检出目录，默认位于 `~/.codex/loopweave`。可以通过
+`LOOPWEAVE_HOME` 指定其他运行根目录；本机保留策略默认从
+`~/.config/loopweave/config.toml` 读取。
 
 ## 开发
 
@@ -193,6 +242,8 @@ python -m compileall -q src tests
 进一步阅读：
 
 - [命令参考](docs/CLI_REFERENCE.md)
+- [Run 运维手册](docs/OPERATIONS.md)
+- [迁移与恢复](docs/MIGRATION_AND_RECOVERY.md)
 - [架构说明](docs/ARCHITECTURE.md)
 - [开发说明](docs/DEVELOPMENT.md)
 - [真实终端测试记录](docs/INTERACTIVE_TEST_FINDINGS.md)

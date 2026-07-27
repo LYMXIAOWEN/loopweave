@@ -396,10 +396,17 @@ def _submit_visible(
     from .visible_review import create_review_card, queue_visible_review_card
     task_packet = _visible_task_packet_path(run_dir)
     if not task_packet.exists():
+        from .task_continuity import recovery_guidance
+
         raise SubmissionError(
-            "run {} has no task assignment; assign one with "
+            "run {} has no task assignment; recover a verified prior packet with "
+            "`{guidance}`, assign a new one with "
             "`loopweave assign --run-id {rid} --task-file <path>` or relaunch "
-            "with `loopweave run <agent> --task-file <path>`".format(run_id, rid=run_id)
+            "with `loopweave run <agent> --task-file <path>`".format(
+                run_id,
+                rid=run_id,
+                guidance=recovery_guidance(registry, run),
+            )
         )
     card = create_review_card(
         run_id=run_id,

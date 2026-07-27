@@ -47,6 +47,7 @@ from .models import (
     RunMode,
     RunRecord,
     RunState,
+    StorageState,
     TERMINAL_STATES,
 )
 from .project_workspace import resolve_project_workspace
@@ -65,11 +66,19 @@ from .review_policy import apply_review_policy
 from . import terminal_host
 from .terminal_host import create_terminal_host
 from .submission import submit_final, submit_needs_human, submit_stage, SubmissionError
+from .task_continuity import TaskContinuityError, adopt_task
 from .liveness import (
     audit_orphan,
     authenticated_identity_check,
     reconcile_liveness,
     recover_orphaned,
+)
+from .maintenance import MaintenanceManager, record_run_end_hint
+from .run_governance import (
+    GovernanceError,
+    RunDecision,
+    RunGovernance,
+    render_decisions,
 )
 from .thread_takeover import ThreadTakeoverCoordinator
 from .visible_review import (
@@ -111,6 +120,7 @@ class LoopWeaveArgumentParser(argparse.ArgumentParser):
         mode = RunMode.DEVELOP.value
         reviewer = ReviewBackend.EPHEMERAL.value
         task_file = None
+        continue_run = None
         agent_args = []
         index = 0
         while index < len(bridge_values):
@@ -122,6 +132,13 @@ class LoopWeaveArgumentParser(argparse.ArgumentParser):
                 task_file = bridge_values[index]
             elif value.startswith("--task-file="):
                 task_file = value.split("=", 1)[1]
+            elif value == "--continue-run":
+                index += 1
+                if index >= len(bridge_values):
+                    self.error("--continue-run requires a value")
+                continue_run = bridge_values[index]
+            elif value.startswith("--continue-run="):
+                continue_run = value.split("=", 1)[1]
             elif value == "--thread":
                 index += 1
                 if index >= len(bridge_values):
@@ -190,6 +207,9 @@ class LoopWeaveArgumentParser(argparse.ArgumentParser):
         parsed.mode = mode
         parsed.reviewer = reviewer
         parsed.task_file = task_file
+        parsed.continue_run = continue_run
+        if task_file and continue_run:
+            self.error("--task-file and --continue-run are mutually exclusive")
         parsed.agent_args = agent_args
         return parsed
 
@@ -215,7 +235,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=ReviewBackend.EPHEMERAL.value,
     )
     run_parser.add_argument("agent_args", nargs="*", default=[])
-    run_parser.add_argument("--task-file", dest="task_file", default=None)
+    run_task_group = run_parser.add_mutually_exclusive_group()
+    run_task_group.add_argument("--task-file", dest="task_file", default=None)
+    run_task_group.add_argument(
+        "--continue-run",
+        dest="continue_run",
+        default=None,
+        help="adopt the verified task packet from a compatible earlier run",
+    )
 
     status_parser = subparsers.add_parser("status", help="show one run")
     status_parser.add_argument("run_id", nargs="?")
@@ -241,6 +268,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="emit a machine-readable JSON array instead of the text table",
+    )
+    runs_scope = runs_parser.add_mutually_exclusive_group()
+    runs_scope.add_argument(
+        "--all",
+        action="store_true",
+        help="include hot, archived, ledger-only, and recovery records",
+    )
+    runs_scope.add_argument(
+        "--archived",
+        action="store_true",
+        help="show archived and ledger-only runs",
     )
 
     attach_parser = subparsers.add_parser(
@@ -368,6 +406,66 @@ def build_parser() -> argparse.ArgumentParser:
         help="select the only live assignable run",
     )
     assign_parser.add_argument("--task-file", required=True)
+    assign_parser.add_argument(
+        "--redeliver",
+        action="store_true",
+        help="re-send the same verified packet after the terminal is ready",
+    )
+
+    adopt_parser = subparsers.add_parser(
+        "adopt-task",
+        help="install a verified task packet from a compatible earlier run",
+    )
+    adopt_parser.add_argument("--run-id", required=True)
+    adopt_parser.add_argument("--from-run", required=True)
+
+    archive_parser = subparsers.add_parser(
+        "archive", help="archive one dead, unprotected run"
+    )
+    archive_parser.add_argument("run_id")
+    archive_parser.add_argument("--reason", default="manual archive")
+
+    restore_parser = subparsers.add_parser(
+        "restore", help="restore one verified archive into the hot run root"
+    )
+    restore_parser.add_argument("run_id")
+    restore_parser.add_argument("--reason", default="manual restore")
+
+    pin_parser = subparsers.add_parser(
+        "pin", help="protect one run from automatic storage actions"
+    )
+    pin_parser.add_argument("run_id")
+    pin_parser.add_argument("--reason", default="manual pin")
+
+    unpin_parser = subparsers.add_parser(
+        "unpin", help="remove an explicit run pin"
+    )
+    unpin_parser.add_argument("run_id")
+
+    gc_parser = subparsers.add_parser(
+        "gc", help="plan or apply lifecycle retention actions"
+    )
+    gc_action = gc_parser.add_mutually_exclusive_group(required=True)
+    gc_action.add_argument("--dry-run", action="store_true")
+    gc_action.add_argument("--apply", action="store_true")
+    gc_parser.add_argument("--json", action="store_true")
+    gc_parser.add_argument(
+        "--plan",
+        help="apply an exact persisted plan instead of gc-plan-latest.json",
+    )
+
+    maintenance_parser = subparsers.add_parser(
+        "maintenance", help="manage daily one-shot lifecycle maintenance"
+    )
+    maintenance_subparsers = maintenance_parser.add_subparsers(
+        dest="maintenance_command",
+        required=True,
+    )
+    maintenance_subparsers.add_parser("install")
+    maintenance_subparsers.add_parser("status")
+    maintenance_run = maintenance_subparsers.add_parser("run")
+    maintenance_run.add_argument("--scheduled", action="store_true")
+    maintenance_subparsers.add_parser("uninstall")
 
     hook_parser = subparsers.add_parser("hook", help="internal Agent hook entry")
     hook_parser.add_argument("hook_name", choices=["claude-stop"])
@@ -414,6 +512,42 @@ def render_status_json(run: RunRecord) -> str:
 
 def render_runs_json(runs: Iterable[RunRecord]) -> str:
     return json.dumps([_status_payload(run) for run in runs])
+
+
+def _governed_payload(run: RunRecord, decision: RunDecision) -> Dict[str, object]:
+    payload = _status_payload(run)
+    payload.update(
+        {
+            "storage_state": decision.storage_state,
+            "governance_action": decision.action,
+            "protection_reasons": list(decision.reasons),
+            "size_bytes": decision.size_bytes,
+            "last_activity": decision.last_activity,
+        }
+    )
+    return payload
+
+
+def render_governed_runs(
+    runs: Iterable[RunRecord], decisions: Dict[str, RunDecision]
+) -> str:
+    rows = [
+        "RUN ID\tAGENT\tRUN STATE\tSTORAGE\tACTION\tSIZE\tPROTECTION / REASON"
+    ]
+    for run in runs:
+        decision = decisions[run.run_id]
+        rows.append(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}".format(
+                run.run_id,
+                run.agent,
+                run.state.value,
+                decision.storage_state,
+                decision.action,
+                decision.size_bytes,
+                ", ".join(decision.reasons) or "-",
+            )
+        )
+    return "\n".join(rows)
 
 
 def _status_payload(run: RunRecord) -> Dict[str, object]:
@@ -479,6 +613,10 @@ def doctor_checks(
 def _registry() -> Registry:
     ensure_runtime_dirs()
     return Registry(REGISTRY_PATH)
+
+
+def _governance(registry: Registry) -> RunGovernance:
+    return RunGovernance(registry)
 
 
 def _latest_active_run(registry: Registry) -> RunRecord:
@@ -1033,6 +1171,7 @@ def _run_agent(args: argparse.Namespace) -> int:
         passthrough=True,
     )
     pid = supervisor.start()
+    record_created = False
     try:
         tty_path = os.ttyname(sys.stdin.fileno()) if sys.stdin.isatty() else ""
         record = RunRecord(
@@ -1068,6 +1207,7 @@ def _run_agent(args: argparse.Namespace) -> int:
             run_dir=str(run_dir),
         )
         registry.create_run(record)
+        record_created = True
         write_json_atomic(
             run_dir / "run.json",
             {
@@ -1106,6 +1246,7 @@ def _run_agent(args: argparse.Namespace) -> int:
             {"event": "run_started", "pid": pid, "mode": run_mode.value},
         )
         task_file = getattr(args, "task_file", None)
+        continue_run = getattr(args, "continue_run", None)
         if task_file:
             # Deterministic startup: the child is already spawned (supervisor
             # started above); install the run-scoped task packet and deliver
@@ -1117,8 +1258,36 @@ def _run_agent(args: argparse.Namespace) -> int:
                 Path(task_file),
                 registry=registry,
             )
+        elif continue_run:
+            adopt_task(
+                registry,
+                run_id,
+                continue_run,
+                operator_action="loopweave run --continue-run",
+            )
     except BaseException:
         supervisor.stop()
+        if record_created:
+            try:
+                current = registry.get_run(run_id)
+                if current.state not in TERMINAL_STATES:
+                    registry.force_state(run_id, RunState.FAILED)
+                append_event(
+                    run_dir / "events.jsonl",
+                    {
+                        "event": "run_start_failed",
+                        "run_id": run_id,
+                        "reason": "startup_initialization_failed",
+                    },
+                )
+                record_run_end_hint(
+                    run_id, RUNS_DIR.parent / "maintenance"
+                )
+            except Exception:
+                # Preserve the original startup failure. The registered run
+                # remains fail-closed and later liveness reconciliation can
+                # still prove that its managed process is gone.
+                pass
         raise
     exit_code = 1
     try:
@@ -1138,6 +1307,10 @@ def _run_agent(args: argparse.Namespace) -> int:
         run_dir / "events.jsonl",
         {"event": "run_exited", "exit_code": exit_code},
     )
+    try:
+        record_run_end_hint(run_id, RUNS_DIR.parent / "maintenance")
+    except OSError:
+        pass
     return exit_code
 
 
@@ -1237,19 +1410,55 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.command == "runs":
             _reconcile_assignable_liveness(registry)
             runs = registry.list_runs()
+            governance = _governance(registry)
+            decisions = {
+                decision.run_id: decision
+                for decision in governance.list_decisions()
+            }
+            if args.archived:
+                runs = [
+                    run
+                    for run in runs
+                    if decisions[run.run_id].storage_state
+                    in {"archived", "ledger_only"}
+                ]
+            elif not args.all:
+                runs = [
+                    run
+                    for run in runs
+                    if decisions[run.run_id].storage_state == "hot"
+                ]
             if args.json:
-                print(render_runs_json(runs))
+                print(
+                    json.dumps(
+                        [
+                            _governed_payload(run, decisions[run.run_id])
+                            for run in runs
+                        ]
+                    )
+                )
             else:
-                print(render_runs(runs))
+                print(render_governed_runs(runs, decisions))
             return 0
         if args.command == "status":
             if args.run_id:
                 run = registry.get_run(args.run_id)
-                _reconcile_run_liveness(registry, run)
             else:
                 _reconcile_assignable_liveness(registry)
                 run = _latest_active_run(registry)
-            _takeover_coordinator(registry).reconcile_run(run.run_id)
+            storage = registry.get_storage(run.run_id)
+            non_hot_storage = {
+                StorageState.ARCHIVING,
+                StorageState.ARCHIVED,
+                StorageState.TRASH,
+                StorageState.LEDGER_ONLY,
+                StorageState.PURGED,
+                StorageState.RECOVERY_REQUIRED,
+            }
+            if storage.storage_state not in non_hot_storage:
+                if args.run_id:
+                    _reconcile_run_liveness(registry, run)
+                _takeover_coordinator(registry).reconcile_run(run.run_id)
             run = registry.get_run(run.run_id)
             if args.json:
                 print(render_status_json(run))
@@ -1303,6 +1512,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 run,
                 Path(args.task_file),
                 registry=registry,
+                redeliver=args.redeliver,
             )
             print(
                 "assigned task to {}: {} ({} bytes, sha256={})".format(
@@ -1312,11 +1522,108 @@ def main(argv: Optional[List[str]] = None) -> int:
                     result.sha256,
                 )
             )
-            if result.duplicate:
+            if result.redelivered:
+                print(
+                    "warning: same task digest was explicitly redelivered",
+                    file=sys.stderr,
+                )
+            elif result.duplicate:
                 print(
                     "warning: same task digest was already assigned to this run",
                     file=sys.stderr,
                 )
+            return 0
+        if args.command == "adopt-task":
+            result = adopt_task(
+                registry,
+                args.run_id,
+                args.from_run,
+            )
+            print(
+                "adopted task from {} into {}: {} ({} bytes, sha256={})".format(
+                    result.source_run_id,
+                    result.run_id,
+                    result.latest_path,
+                    result.size,
+                    result.sha256,
+                )
+            )
+            if result.duplicate:
+                print(
+                    "warning: task continuity was already recorded for this run",
+                    file=sys.stderr,
+                )
+            return 0
+        if args.command == "archive":
+            archive_path = _governance(registry).archive_run(
+                args.run_id,
+                reason=args.reason,
+            )
+            print("archived {}: {}".format(args.run_id, archive_path))
+            return 0
+        if args.command == "restore":
+            run_path = _governance(registry).restore_run(
+                args.run_id,
+                reason=args.reason,
+            )
+            print("restored {}: {}".format(args.run_id, run_path))
+            return 0
+        if args.command == "pin":
+            storage = _governance(registry).pin(args.run_id, args.reason)
+            print(
+                "pinned {}: {}".format(
+                    args.run_id, storage.pin_reason
+                )
+            )
+            return 0
+        if args.command == "unpin":
+            _governance(registry).unpin(args.run_id)
+            print("unpinned {}".format(args.run_id))
+            return 0
+        if args.command == "gc":
+            governance = _governance(registry)
+            if args.dry_run:
+                plan = governance.create_gc_plan(persist=True)
+                if args.json:
+                    print(json.dumps(plan.to_dict()))
+                else:
+                    print(
+                        "GC PLAN {} ({})".format(
+                            plan.plan_id, plan.created_at
+                        )
+                    )
+                    print(render_decisions(plan.decisions))
+                    if plan.unregistered_directories:
+                        print("UNREGISTERED (never auto-delete)")
+                        for path in plan.unregistered_directories:
+                            print(path)
+                return 0
+            plan = governance.load_gc_plan(
+                Path(args.plan).expanduser() if args.plan else None
+            )
+            result = governance.apply_gc_plan(plan)
+            if args.json:
+                print(json.dumps(result.to_dict()))
+            else:
+                print(
+                    "applied GC plan {}: {} actions, {} protected/skipped".format(
+                        result.plan_id,
+                        len(result.applied),
+                        len(result.skipped),
+                    )
+                )
+            return 0
+        if args.command == "maintenance":
+            manager = MaintenanceManager(registry)
+            if args.maintenance_command == "install":
+                payload = manager.install()
+            elif args.maintenance_command == "status":
+                payload = manager.status()
+            elif args.maintenance_command == "run":
+                payload = manager.run_once(scheduled=args.scheduled)
+            else:
+                payload = manager.uninstall()
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
             return 0
         if args.command == "request-review":
             _takeover_coordinator(registry).reconcile_run(args.run_id)
@@ -1532,6 +1839,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         ProtocolError,
         RunNotFound,
         AssignmentError,
+        TaskContinuityError,
+        GovernanceError,
         SubmissionError,
         ValueError,
         RuntimeError,

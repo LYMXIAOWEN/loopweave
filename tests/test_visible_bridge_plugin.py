@@ -34,6 +34,18 @@ def test_plugin_manifest_declares_only_local_mcp_server():
     assert not any(key in server for key in ("url", "httpUrl", "headers"))
 
 
+def test_plugin_runtime_defaults_to_canonical_loopweave_home(tmp_path: Path):
+    module = _load_server_module()
+
+    assert module.resolve_runtime_root(environ={}, home=tmp_path) == (
+        tmp_path / ".codex" / "loopweave"
+    ).resolve()
+    assert module.resolve_runtime_root(
+        environ={"LOOPWEAVE_HOME": str(tmp_path / "custom")},
+        home=tmp_path / "ignored",
+    ) == (tmp_path / "custom").resolve()
+
+
 def test_repo_marketplace_points_to_repo_plugin_source():
     marketplace = json.loads(MARKETPLACE_PATH.read_text(encoding="utf-8"))
     assert marketplace["name"] == "loopweave-local"

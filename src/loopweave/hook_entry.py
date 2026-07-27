@@ -361,6 +361,7 @@ def handle_claude_stop(
     run_dir.mkdir(parents=True, exist_ok=True)
     if run.state in {
         RunState.APPROVED,
+        RunState.NEEDS_HUMAN,
         RunState.FAILED,
         RunState.STOPPED,
         RunState.ORPHANED,
@@ -384,6 +385,18 @@ def handle_claude_stop(
             },
         )
         return "owner_review_pending"
+    if run.state is RunState.READY_FOR_REVIEW:
+        if (run_dir / "last-stop.sha256").exists():
+            return "duplicate"
+        append_event(
+            run_dir / "events.jsonl",
+            {
+                "event": "stop_hook_ignored_ready_for_review",
+                "run_id": run_id,
+                "state": run.state.value,
+            },
+        )
+        return "ready_for_review"
     transcript_path = hook_payload.get("transcript_path")
     message = str(hook_payload.get("last_assistant_message") or "").strip()
     transcript_message = extract_latest_assistant_message(

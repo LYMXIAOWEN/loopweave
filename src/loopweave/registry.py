@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import replace
 from pathlib import Path
@@ -10,7 +11,9 @@ from .models import (
     ReviewBackend,
     RunMode,
     RunRecord,
+    RunStorageRecord,
     RunState,
+    StorageState,
     ThreadBinding,
 )
 
@@ -216,6 +219,52 @@ class Registry:
                 """,
                 (protocol.utc_now(),),
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS run_storage (
+                    run_id TEXT PRIMARY KEY,
+                    storage_state TEXT NOT NULL DEFAULT 'hot',
+                    pinned INTEGER NOT NULL DEFAULT 0,
+                    pin_reason TEXT NULL,
+                    archive_path TEXT NULL,
+                    archive_sha256 TEXT NULL,
+                    archive_size INTEGER NULL,
+                    archived_at TEXT NULL,
+                    trash_path TEXT NULL,
+                    trashed_at TEXT NULL,
+                    ledger_path TEXT NULL,
+                    policy_version TEXT NOT NULL DEFAULT '1',
+                    generation INTEGER NOT NULL DEFAULT 1,
+                    last_transition_at TEXT NULL,
+                    recovery_note TEXT NULL,
+                    FOREIGN KEY(run_id) REFERENCES runs(run_id)
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO run_storage (
+                    run_id, storage_state, pinned, policy_version,
+                    generation, last_transition_at
+                )
+                SELECT run_id, 'hot', 0, '1', 1, ?
+                FROM runs
+                """,
+                (protocol.utc_now(),),
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS maintenance_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NULL,
+                    event TEXT NOT NULL,
+                    occurred_at TEXT NOT NULL,
+                    operator TEXT NOT NULL,
+                    reason TEXT NULL,
+                    details_json TEXT NOT NULL DEFAULT '{}'
+                )
+                """
+            )
         self.path.chmod(0o600)
 
     def create_run(self, run: RunRecord) -> None:
@@ -257,6 +306,15 @@ class Registry:
                     run.reviewer_thread_cwd,
                     run.reviewer_generation,
                 ),
+            )
+            connection.execute(
+                """
+                INSERT INTO run_storage (
+                    run_id, storage_state, pinned, policy_version,
+                    generation, last_transition_at
+                ) VALUES (?, ?, 0, '1', 1, ?)
+                """,
+                (run.run_id, StorageState.HOT.value, protocol.utc_now()),
             )
             connection.execute(
                 """
@@ -448,6 +506,151 @@ class Registry:
             ).fetchall()
         return [self._row_to_record(row) for row in rows]
 
+    def get_storage(self, run_id: str) -> RunStorageRecord:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM run_storage WHERE run_id = ?", (run_id,)
+            ).fetchone()
+        if row is None:
+            raise RunNotFound(run_id)
+        return self._row_to_storage(row)
+
+    def list_storage(self) -> list[RunStorageRecord]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM run_storage ORDER BY rowid DESC"
+            ).fetchall()
+        return [self._row_to_storage(row) for row in rows]
+
+    def set_pin(
+        self,
+        run_id: str,
+        *,
+        pinned: bool,
+        reason: Optional[str],
+        operator: str,
+    ) -> RunStorageRecord:
+        timestamp = protocol.utc_now()
+        with self._connect() as connection:
+            self._begin_immediate(connection)
+            self._get_run(connection, run_id)
+            changed = connection.execute(
+                """
+                UPDATE run_storage
+                SET pinned = ?, pin_reason = ?, generation = generation + 1,
+                    last_transition_at = ?
+                WHERE run_id = ?
+                """,
+                (1 if pinned else 0, reason if pinned else None, timestamp, run_id),
+            )
+            if changed.rowcount != 1:
+                raise RegistryError("run storage row is missing")
+            connection.execute(
+                """
+                INSERT INTO maintenance_events (
+                    run_id, event, occurred_at, operator, reason, details_json
+                ) VALUES (?, ?, ?, ?, ?, '{}')
+                """,
+                (
+                    run_id,
+                    "run_pinned" if pinned else "run_unpinned",
+                    timestamp,
+                    operator,
+                    reason,
+                ),
+            )
+        return self.get_storage(run_id)
+
+    def transition_storage(
+        self,
+        run_id: str,
+        *,
+        expected_state: StorageState,
+        expected_generation: int,
+        new_state: StorageState,
+        operator: str,
+        reason: Optional[str] = None,
+        updates: Optional[Dict[str, object]] = None,
+    ) -> RunStorageRecord:
+        allowed_columns = {
+            "archive_path",
+            "archive_sha256",
+            "archive_size",
+            "archived_at",
+            "trash_path",
+            "trashed_at",
+            "ledger_path",
+            "policy_version",
+            "recovery_note",
+        }
+        values = dict(updates or {})
+        unknown = set(values) - allowed_columns
+        if unknown:
+            raise RegistryError(
+                "unsupported storage update columns: {}".format(
+                    ", ".join(sorted(unknown))
+                )
+            )
+        timestamp = protocol.utc_now()
+        assignments = [
+            "storage_state = ?",
+            "generation = generation + 1",
+            "last_transition_at = ?",
+        ]
+        parameters: list[object] = [new_state.value, timestamp]
+        for key, value in values.items():
+            assignments.append("{} = ?".format(key))
+            parameters.append(value)
+        parameters.extend([run_id, expected_state.value, expected_generation])
+        with self._connect() as connection:
+            self._begin_immediate(connection)
+            changed = connection.execute(
+                """
+                UPDATE run_storage
+                SET {}
+                WHERE run_id = ? AND storage_state = ? AND generation = ?
+                """.format(", ".join(assignments)),
+                parameters,
+            )
+            if changed.rowcount != 1:
+                raise RegistryError(
+                    "run storage changed since the plan was created"
+                )
+            connection.execute(
+                """
+                INSERT INTO maintenance_events (
+                    run_id, event, occurred_at, operator, reason, details_json
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    "storage_{}_to_{}".format(
+                        expected_state.value, new_state.value
+                    ),
+                    timestamp,
+                    operator,
+                    reason,
+                    json.dumps(values, ensure_ascii=False, sort_keys=True),
+                ),
+            )
+        return self.get_storage(run_id)
+
+    def list_maintenance_events(self, run_id: Optional[str] = None) -> list[dict]:
+        with self._connect() as connection:
+            if run_id is None:
+                rows = connection.execute(
+                    "SELECT * FROM maintenance_events ORDER BY id"
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM maintenance_events
+                    WHERE run_id = ? ORDER BY id
+                    """,
+                    (run_id,),
+                ).fetchall()
+        return [dict(row) for row in rows]
+
     def transition(self, run_id: str, new_state: RunState) -> RunRecord:
         current = self.get_run(run_id)
         allowed = ALLOWED_TRANSITIONS.get(current.state, set())
@@ -573,4 +776,24 @@ class Registry:
             run_dir=row["run_dir"],
             pending_codex_thread_id=row["pending_codex_thread_id"],
             binding_generation=row["binding_generation"],
+        )
+
+    @staticmethod
+    def _row_to_storage(row: sqlite3.Row) -> RunStorageRecord:
+        return RunStorageRecord(
+            run_id=row["run_id"],
+            storage_state=StorageState(row["storage_state"]),
+            pinned=bool(row["pinned"]),
+            pin_reason=row["pin_reason"],
+            archive_path=row["archive_path"],
+            archive_sha256=row["archive_sha256"],
+            archive_size=row["archive_size"],
+            archived_at=row["archived_at"],
+            trash_path=row["trash_path"],
+            trashed_at=row["trashed_at"],
+            ledger_path=row["ledger_path"],
+            policy_version=row["policy_version"],
+            generation=row["generation"],
+            last_transition_at=row["last_transition_at"],
+            recovery_note=row["recovery_note"],
         )

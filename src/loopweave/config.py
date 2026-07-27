@@ -13,12 +13,20 @@ def _configured_path(name: str, default: Path) -> Path:
     return Path(value).expanduser().resolve() if value else default.resolve()
 
 
-PROJECT_ROOT = _configured_path("LOOPWEAVE_HOME", SOURCE_ROOT)
+CODEX_HOME = _configured_path("CODEX_HOME", Path.home() / ".codex")
+PROJECT_ROOT = _configured_path("LOOPWEAVE_HOME", CODEX_HOME / "loopweave")
 PROJECTS_DIR = PROJECT_ROOT / "projects"
 RUNS_DIR = PROJECT_ROOT / "runs"
+ARCHIVES_DIR = PROJECT_ROOT / "archives"
+LEDGER_DIR = PROJECT_ROOT / "ledger"
+TRASH_DIR = PROJECT_ROOT / "trash"
+MAINTENANCE_DIR = PROJECT_ROOT / "maintenance"
 VAR_DIR = PROJECT_ROOT / "var"
 REGISTRY_PATH = VAR_DIR / "registry.sqlite"
-CODEX_HOME = _configured_path("CODEX_HOME", Path.home() / ".codex")
+CONFIG_PATH = _configured_path(
+    "LOOPWEAVE_CONFIG",
+    Path.home() / ".config" / "loopweave" / "config.toml",
+)
 CODEX_SESSIONS_DIR = CODEX_HOME / "sessions"
 CODEX_BIN = Path("/Applications/Codex.app/Contents/Resources/codex")
 DESKTOP_CODEX_BIN = Path(
@@ -54,4 +62,8 @@ def resolve_codex_bin() -> Path:
 def ensure_runtime_dirs() -> None:
     PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    ARCHIVES_DIR.mkdir(parents=True, exist_ok=True)
+    LEDGER_DIR.mkdir(parents=True, exist_ok=True)
+    TRASH_DIR.mkdir(parents=True, exist_ok=True)
+    MAINTENANCE_DIR.mkdir(parents=True, exist_ok=True)
     VAR_DIR.mkdir(parents=True, exist_ok=True)

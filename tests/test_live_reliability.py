@@ -821,10 +821,13 @@ class TaskProvenanceContractTests(unittest.TestCase):
                 sender=capturing,
                 process_start_reader=lambda pid: "start",
             )
-            self.assertGreaterEqual(len(captured), 2)
-            self.assertIn("# Task", captured[0]["text"])
-            self.assertIn("Body of the task.", captured[0]["text"])
-            self.assertEqual(captured[1]["text"], "\r")
+            delivered = [
+                payload for payload in captured if payload["action"] == "send"
+            ]
+            self.assertEqual(len(delivered), 2)
+            self.assertIn("# Task", delivered[0]["text"])
+            self.assertIn("Body of the task.", delivered[0]["text"])
+            self.assertEqual(delivered[1]["text"], "\r")
 
     def test_same_task_retry_is_idempotent_no_redelivery(self) -> None:
         """ADR 0002 section 5: re-assigning the same task (identical digest)
@@ -854,10 +857,14 @@ class TaskProvenanceContractTests(unittest.TestCase):
                 (run_dir / "assigned-task-latest.md").read_text(encoding="utf-8"),
                 task_text,
             )
-            # One assignment delivers [message, "\r"] = 2 control sends; a
-            # same-task retry must NOT re-deliver.
+            # Readiness may add authenticated status probes. One assignment
+            # still delivers exactly [message, "\r"] = 2 send actions; a
+            # same-task retry must NOT add another send action.
+            delivered = [
+                payload for payload in sent if payload["action"] == "send"
+            ]
             self.assertEqual(
-                len(sent),
+                len(delivered),
                 2,
                 "idempotent retry must not re-deliver the task to the worker",
             )

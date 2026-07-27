@@ -14,6 +14,7 @@ from loopweave.models import (
     RunMode,
     RunRecord,
     RunState,
+    StorageState,
     ThreadBinding,
 )
 from loopweave.registry import (
@@ -205,6 +206,14 @@ class RegistryTests(unittest.TestCase):
                     attached_at="2026-06-19T02:03:04+00:00",
                 )
             ],
+        )
+        storage = migrated_again.get_storage("legacy-run")
+        self.assertEqual(storage.storage_state, StorageState.HOT)
+        self.assertFalse(storage.pinned)
+        self.assertEqual(storage.generation, 1)
+        self.assertEqual(
+            [item.run_id for item in migrated_again.list_storage()],
+            ["legacy-run"],
         )
 
     def test_create_run_records_initial_thread_binding(self) -> None:

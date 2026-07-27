@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 from loopweave.supervisor import Supervisor, send_control_message
+from loopweave.runtime_config import RunPolicy
 
 
 class SupervisorTests(unittest.TestCase):
@@ -59,17 +60,74 @@ class SupervisorTests(unittest.TestCase):
         time.sleep(0.1)
         self.assertNotIn("DO NOT SEND", self._output())
 
+    def test_status_reports_terminal_output_activity_for_readiness(self) -> None:
+        response = send_control_message(
+            self.socket_path,
+            {"token": "secret", "action": "status"},
+        )
+
+        self.assertEqual(response["status"], "ok")
+        self.assertEqual(response["run_id"], "run-1")
+        self.assertEqual(response["pid"], self.pid)
+        self.assertGreater(response["terminal_output_bytes"], 0)
+        self.assertIsInstance(response["terminal_idle_seconds"], float)
+        self.assertGreaterEqual(response["terminal_idle_seconds"], 0)
+
     def test_transcript_is_recorded(self) -> None:
         self.supervisor.send_input("record-me\n")
         self._wait_for("text=record-me")
 
-        self.assertTrue((self.root / "run" / "terminal.raw.log").exists())
+        self.assertFalse((self.root / "run" / "terminal.raw.log").exists())
         self.assertIn(
             "text=record-me",
             (self.root / "run" / "terminal.txt").read_text(
                 encoding="utf-8", errors="replace"
             ),
         )
+
+    def test_raw_transcript_requires_explicit_opt_in(self) -> None:
+        self.supervisor.stop()
+        fixture = Path(__file__).parent / "fixtures" / "echo_agent.py"
+        self.supervisor = Supervisor(
+            run_id="run-raw",
+            command=[sys.executable, "-u", str(fixture)],
+            cwd=self.root,
+            run_dir=self.root / "raw-run",
+            socket_path=self.root / "raw-control.sock",
+            control_token="secret",
+            passthrough=False,
+            log_policy=RunPolicy(raw_log_enabled=True),
+        )
+        self.pid = self.supervisor.start()
+        deadline = time.time() + 3
+        raw_path = self.root / "raw-run" / "terminal.raw.log"
+        while time.time() < deadline and not raw_path.exists():
+            time.sleep(0.02)
+        self.assertTrue(raw_path.exists())
+
+    def test_terminal_log_rotation_is_bounded(self) -> None:
+        path = self.root / "rotating.txt"
+        policy = RunPolicy(terminal_log_max_bytes=1024, terminal_log_backups=2)
+        probe = Supervisor(
+            run_id="run-rotation",
+            command=[sys.executable, "-c", "pass"],
+            cwd=self.root,
+            run_dir=self.root / "rotation-run",
+            socket_path=self.root / "rotation.sock",
+            control_token="secret",
+            passthrough=False,
+            log_policy=policy,
+        )
+        path.write_bytes(b"a" * 900)
+        probe._append_rotating_log(
+            path,
+            b"b" * 200,
+            max_bytes=policy.terminal_log_max_bytes,
+            backups=policy.terminal_log_backups,
+            log_kind="terminal.txt",
+        )
+        self.assertEqual(path.stat().st_size, 200)
+        self.assertEqual(path.with_name("rotating.txt.1").stat().st_size, 900)
 
     def test_terminal_diagnostics_record_initial_size_when_available(self) -> None:
         diagnostics = self.root / "run" / "terminal-events.jsonl"

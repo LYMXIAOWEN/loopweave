@@ -125,10 +125,12 @@ class AssignmentValidationTests(unittest.TestCase):
             self.assertEqual(result.latest_path, latest)
             self.assertTrue(assigned.exists())
             self.assertEqual(latest.read_text(encoding="utf-8"), task.read_text(encoding="utf-8"))
-            self.assertEqual(sent[0][0], socket_path)
-            self.assertEqual(sent[0][1]["token"], run.control_token)
-            self.assertEqual(sent[0][1]["action"], "send")
-            self.assertIn("[LoopWeave assignment]", sent[0][1]["text"])
+            self.assertEqual(sent[0][1]["action"], "status")
+            delivered = [entry for entry in sent if entry[1]["action"] == "send"]
+            self.assertEqual(len(delivered), 2)
+            self.assertEqual(delivered[0][0], socket_path)
+            self.assertEqual(delivered[0][1]["token"], run.control_token)
+            self.assertIn("[LoopWeave assignment]", delivered[0][1]["text"])
             events = [
                 json.loads(line)
                 for line in (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
@@ -315,11 +317,119 @@ class AssignmentValidationTests(unittest.TestCase):
                 timestamp_factory=lambda: "20260627T010203Z",
             )
 
-            self.assertEqual(len(sent), 2)
-            self.assertIn("[LoopWeave assignment]", sent[0][1]["text"])
-            self.assertEqual(sent[1][1]["text"], "\r")
-            self.assertEqual(sent[1][1]["action"], "send")
-            self.assertEqual(sent[0][1]["token"], sent[1][1]["token"])
+            self.assertEqual(sent[0][1]["action"], "status")
+            delivered = [entry for entry in sent if entry[1]["action"] == "send"]
+            self.assertEqual(len(delivered), 2)
+            self.assertIn("[LoopWeave assignment]", delivered[0][1]["text"])
+            self.assertEqual(delivered[1][1]["text"], "\r")
+            self.assertEqual(
+                delivered[0][1]["token"], delivered[1][1]["token"]
+            )
+
+    def test_terminal_readiness_waits_for_real_output_quiet_period(self) -> None:
+        from loopweave.assignment import wait_for_terminal_readiness
+        from loopweave.runtime_config import RunPolicy
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = make_run("run-live", RunState.RUNNING, 1)
+            run = RunRecord(
+                **{
+                    **run.__dict__,
+                    "run_dir": str(root / "run"),
+                    "socket_path": str(root / "control.sock"),
+                }
+            )
+            responses = [
+                {
+                    "status": "ok",
+                    "run_id": run.run_id,
+                    "pid": run.agent_pid,
+                    "running": True,
+                    "terminal_output_bytes": 128,
+                    "terminal_idle_seconds": 0.0,
+                },
+                {
+                    "status": "ok",
+                    "run_id": run.run_id,
+                    "pid": run.agent_pid,
+                    "running": True,
+                    "terminal_output_bytes": 256,
+                    "terminal_idle_seconds": 0.2,
+                },
+            ]
+
+            result = wait_for_terminal_readiness(
+                run,
+                lambda _path, _payload: responses.pop(0),
+                events_path=root / "events.jsonl",
+                policy=RunPolicy(
+                    task_ready_quiet_ms=100,
+                    task_ready_fallback_ms=500,
+                    task_ready_timeout_ms=1000,
+                ),
+            )
+
+            self.assertEqual(result["terminal_output_bytes"], 256)
+            event = json.loads(
+                (root / "events.jsonl").read_text(encoding="utf-8").splitlines()[-1]
+            )
+            self.assertEqual(event["event"], "terminal_readiness_observed")
+            self.assertEqual(event["reason"], "terminal_output_quiet")
+
+    def test_explicit_redelivery_reuses_verified_packet_after_readiness(
+        self,
+    ) -> None:
+        from loopweave.assignment import assign_task
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            task = root / "task.md"
+            task.write_text("# Task\n", encoding="utf-8")
+            run = make_run("run-live", RunState.RUNNING, 1)
+            run = RunRecord(
+                **{
+                    **run.__dict__,
+                    "run_dir": str(root / "run"),
+                    "socket_path": str(root / "control.sock"),
+                }
+            )
+            Path(run.socket_path).write_text("", encoding="utf-8")
+            sent = []
+
+            def sender(path, payload):
+                sent.append((path, payload))
+                return {"status": "ok"}
+
+            assign_task(
+                run,
+                task,
+                sender=sender,
+                process_start_reader=lambda _pid: run.agent_process_start,
+                timestamp_factory=lambda: "20260627T010203Z",
+            )
+            sent.clear()
+
+            result = assign_task(
+                run,
+                task,
+                sender=sender,
+                process_start_reader=lambda _pid: run.agent_process_start,
+                redeliver=True,
+            )
+
+            self.assertTrue(result.duplicate)
+            self.assertTrue(result.redelivered)
+            self.assertEqual(sent[0][1]["action"], "status")
+            delivered = [entry for entry in sent if entry[1]["action"] == "send"]
+            self.assertEqual(len(delivered), 2)
+            events = [
+                json.loads(line)
+                for line in (Path(run.run_dir) / "events.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            self.assertEqual(events[-1]["event"], "task_redelivered")
 
     def test_assign_task_wraps_sender_exception_as_delivery_failure(self) -> None:
         from loopweave.assignment import assign_task

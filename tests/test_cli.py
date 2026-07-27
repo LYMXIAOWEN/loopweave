@@ -3,9 +3,11 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from loopweave.cli import (
@@ -19,9 +21,16 @@ from loopweave.cli import (
     render_runs_json,
     render_status_json,
 )
-from loopweave.models import ReviewBackend, RunMode, RunRecord, RunState
+from loopweave.models import (
+    ReviewBackend,
+    RunMode,
+    RunRecord,
+    RunState,
+    StorageState,
+)
 from loopweave.protocol import ProtocolError
 from loopweave.registry import Registry
+from loopweave.run_governance import RunDecision
 from loopweave.thread_takeover import AttachResult
 from loopweave.visible_review import create_review_card, queue_visible_review_card
 
@@ -91,6 +100,84 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.command, "run")
         self.assertEqual(args.agent, "claude")
         self.assertEqual(args.thread, "thread-1")
+
+    def test_run_startup_failure_stops_process_and_closes_registered_run(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runs = root / "runs"
+            runs.mkdir()
+            var = root / "var"
+            var.mkdir()
+            workspace = root / "workspace"
+            workspace.mkdir()
+            registry = Registry(var / "registry.sqlite")
+            supervisor = Mock()
+            supervisor.start.return_value = 321
+            args = SimpleNamespace(
+                cwd=str(workspace),
+                cwd_explicit=True,
+                project=None,
+                workspace=None,
+                thread=None,
+                agent="generic",
+                agent_args=[sys.executable],
+                mode="develop",
+                reviewer="ephemeral",
+                task_file=str(root / "task.md"),
+                continue_run=None,
+            )
+
+            with patch("loopweave.cli.ensure_runtime_dirs"), patch(
+                "loopweave.cli.RUNS_DIR", runs
+            ), patch("loopweave.cli.VAR_DIR", var), patch(
+                "loopweave.cli._registry", return_value=registry
+            ), patch(
+                "loopweave.cli.discover_thread",
+                return_value=SimpleNamespace(
+                    thread_id="thread", cwd=str(workspace)
+                ),
+            ), patch(
+                "loopweave.cli.os.getcwd", return_value=str(workspace)
+            ), patch(
+                "loopweave.cli.capture_workspace_baseline",
+                return_value={"schema_version": 1},
+            ), patch(
+                "loopweave.cli.create_terminal_host",
+                return_value=supervisor,
+            ), patch(
+                "loopweave.terminal_host.default_process_identity_reader",
+                return_value=lambda _pid: "start",
+            ), patch(
+                "loopweave.cli.assign_task",
+                side_effect=RuntimeError("task delivery failed"),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "task delivery failed"
+                ):
+                    from loopweave.cli import _run_agent
+
+                    _run_agent(args)
+
+            supervisor.stop.assert_called_once()
+            run = registry.list_runs()[0]
+            self.assertEqual(run.state, RunState.FAILED)
+            events = [
+                json.loads(line)
+                for line in (
+                    Path(run.run_dir) / "events.jsonl"
+                ).read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(events[-1]["event"], "run_start_failed")
+            self.assertNotIn("task delivery failed", json.dumps(events))
+            self.assertTrue(
+                (
+                    root
+                    / "maintenance"
+                    / "run-end-latest.json"
+                ).is_file()
+            )
 
     def test_parser_accepts_generic_command_after_separator(self) -> None:
         parser = build_parser()
@@ -372,6 +459,39 @@ class CliTests(unittest.TestCase):
         )
         self.assertEqual(output.getvalue(), expected)
 
+    def test_status_of_archived_run_does_not_read_missing_hot_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry = Registry(root / "registry.sqlite")
+            run = _status_run(
+                state=RunState.APPROVED,
+                run_dir=str(root / "runs" / "run-1"),
+            )
+            registry.create_run(run)
+            storage = registry.get_storage(run.run_id)
+            registry.transition_storage(
+                run.run_id,
+                expected_state=StorageState.HOT,
+                expected_generation=storage.generation,
+                new_state=StorageState.ARCHIVED,
+                operator="test",
+                reason="status regression",
+            )
+            coordinator = Mock()
+            output = io.StringIO()
+
+            with patch("loopweave.cli._registry", return_value=registry), patch(
+                "loopweave.cli._takeover_coordinator",
+                return_value=coordinator,
+            ), patch("sys.stdout", output):
+                exit_code = main(["status", "run-1", "--json"])
+
+            self.assertEqual(exit_code, 0)
+            coordinator.reconcile_run.assert_not_called()
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["run_id"], "run-1")
+            self.assertEqual(payload["state"], "approved")
+
     def test_manual_design_review_honors_two_round_limit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -538,6 +658,16 @@ class CliTests(unittest.TestCase):
         latest = parser.parse_args(
             ["assign", "--latest", "--task-file", "/tmp/task.md"]
         )
+        redelivery = parser.parse_args(
+            [
+                "assign",
+                "--run-id",
+                "run-1",
+                "--task-file",
+                "/tmp/task.md",
+                "--redeliver",
+            ]
+        )
 
         self.assertEqual(by_id.command, "assign")
         self.assertEqual(by_id.run_id, "run-1")
@@ -545,6 +675,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(by_id.task_file, "/tmp/task.md")
         self.assertTrue(latest.latest)
         self.assertIsNone(latest.run_id)
+        self.assertTrue(redelivery.redeliver)
 
     def test_parser_accepts_finalize_approval_or_changes(self) -> None:
         parser = build_parser()
@@ -965,9 +1096,11 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(code, 0)
             self.assertIn("assigned task", stdout.getvalue())
-            self.assertEqual(len(sent), 2)
-            self.assertIn("[LoopWeave assignment]", sent[0][1]["text"])
-            self.assertEqual(sent[1][1]["text"], "\r")
+            self.assertEqual(sent[0][1]["action"], "status")
+            delivered = [entry for entry in sent if entry[1]["action"] == "send"]
+            self.assertEqual(len(delivered), 2)
+            self.assertIn("[LoopWeave assignment]", delivered[0][1]["text"])
+            self.assertEqual(delivered[1][1]["text"], "\r")
 
     def test_stop_returns_error_when_agent_process_survives(self) -> None:
         run = _status_run(state=RunState.RUNNING)
@@ -1117,8 +1250,10 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(registry.get_run("run-stale").state, RunState.ORPHANED)
             self.assertEqual(registry.get_run("run-live").state, RunState.RUNNING)
-            self.assertEqual(len(sent), 2)
-            self.assertIn("run-live", str(sent[0][0]))
+            self.assertEqual(sent[0][1]["action"], "status")
+            delivered = [entry for entry in sent if entry[1]["action"] == "send"]
+            self.assertEqual(len(delivered), 2)
+            self.assertIn("run-live", str(delivered[0][0]))
 
     def _visible_run(self, root: Path, run_id: str) -> RunRecord:
         run_dir = root / run_id
@@ -1364,9 +1499,24 @@ class RunsCliTests(unittest.TestCase):
     def test_runs_without_json_keeps_tabular_text_output(self) -> None:
         registry = Mock()
         registry.list_runs.return_value = [_status_run()]
+        governance = Mock()
+        governance.list_decisions.return_value = [
+            RunDecision(
+                run_id="run-1",
+                action="none",
+                reasons=("active_run_state:running",),
+                run_state="running",
+                storage_state="hot",
+                size_bytes=1234,
+                last_activity="2026-07-27T00:00:00+00:00",
+                snapshot="snapshot",
+            )
+        ]
         output = io.StringIO()
 
         with patch("loopweave.cli._registry", return_value=registry), patch(
+            "loopweave.cli._governance", return_value=governance
+        ), patch(
             "loopweave.terminal_host.default_process_identity_reader",
             return_value=lambda pid: "start",
         ), patch(
@@ -1376,8 +1526,9 @@ class RunsCliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         expected = (
-            "RUN ID\tAGENT\tSTATE\tPID\tGEN\tTHREAD\tPENDING\n"
-            "run-1\tclaude\trunning\t123\t2\tthread-1\t-\n"
+            "RUN ID\tAGENT\tRUN STATE\tSTORAGE\tACTION\tSIZE\tPROTECTION / REASON\n"
+            "run-1\tclaude\trunning\thot\tnone\t1234\t"
+            "active_run_state:running\n"
         )
         self.assertEqual(output.getvalue(), expected)
 
@@ -1388,9 +1539,25 @@ class RunsCliTests(unittest.TestCase):
         )
         registry = Mock()
         registry.list_runs.return_value = [first, second]
+        governance = Mock()
+        governance.list_decisions.return_value = [
+            RunDecision(
+                run_id=run_id,
+                action="none",
+                reasons=("active_run_state:running",),
+                run_state="running",
+                storage_state="hot",
+                size_bytes=0,
+                last_activity=None,
+                snapshot="snapshot-{}".format(run_id),
+            )
+            for run_id in ("run-a", "run-b")
+        ]
         output = io.StringIO()
 
         with patch("loopweave.cli._registry", return_value=registry), patch(
+            "loopweave.cli._governance", return_value=governance
+        ), patch(
             "loopweave.terminal_host.default_process_identity_reader",
             return_value=lambda pid: "start",
         ), patch(
@@ -1404,16 +1571,30 @@ class RunsCliTests(unittest.TestCase):
         self.assertEqual(len(payload), 2)
         self.assertEqual([item["run_id"] for item in payload], ["run-a", "run-b"])
         for item in payload:
-            self.assertEqual(set(item), REQUIRED_STATUS_JSON_KEYS)
+            self.assertEqual(
+                set(item),
+                REQUIRED_STATUS_JSON_KEYS
+                | {
+                    "storage_state",
+                    "governance_action",
+                    "protection_reasons",
+                    "size_bytes",
+                    "last_activity",
+                },
+            )
         self.assertIsNone(payload[0]["pending_codex_thread_id"])
         self.assertEqual(payload[1]["pending_codex_thread_id"], "thread-pending")
 
     def test_runs_json_empty_registry_emits_empty_array(self) -> None:
         registry = Mock()
         registry.list_runs.return_value = []
+        governance = Mock()
+        governance.list_decisions.return_value = []
         output = io.StringIO()
 
         with patch("loopweave.cli._registry", return_value=registry), patch(
+            "loopweave.cli._governance", return_value=governance
+        ), patch(
             "sys.stdout", output
         ):
             exit_code = main(["runs", "--json"])

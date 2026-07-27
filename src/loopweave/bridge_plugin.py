@@ -35,6 +35,7 @@ class BridgePluginManager:
                 "restart_required": True,
                 "commands": [
                     self._marketplace_add_command(),
+                    self._plugin_remove_command(),
                     self._plugin_add_command(),
                 ],
             }
@@ -48,9 +49,19 @@ class BridgePluginManager:
         }
         if MARKETPLACE_NAME not in configured:
             self._run_json(self._marketplace_add_command()[1:])
+        installed = self._run_json(["plugin", "list", "--json"])
+        refresh = any(
+            isinstance(item, dict)
+            and item.get("pluginId") == PLUGIN_SELECTOR
+            and bool(item.get("installed", True))
+            for item in installed.get("installed", [])
+        )
+        if refresh:
+            self._run_json(self._plugin_remove_command()[1:])
         payload = self._run_json(self._plugin_add_command()[1:])
         return {
             "installed": True,
+            "refreshed": refresh,
             "plugin_id": payload.get("pluginId", PLUGIN_SELECTOR),
             "restart_required": True,
         }

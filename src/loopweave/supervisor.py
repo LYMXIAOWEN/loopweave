@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .protocol import append_event
+from .runtime_config import RunPolicy, load_run_policy
 from .terminal_host import TerminalHost
 
 try:
@@ -75,6 +76,7 @@ class Supervisor(TerminalHost):
         socket_path: Path,
         control_token: str,
         passthrough: bool = True,
+        log_policy: Optional[RunPolicy] = None,
     ) -> None:
         if not command:
             raise ValueError("command is required")
@@ -85,12 +87,16 @@ class Supervisor(TerminalHost):
         self.socket_path = Path(socket_path)
         self.control_token = control_token
         self.passthrough = passthrough
+        self.log_policy = log_policy if log_policy is not None else load_run_policy()
         self.process: Optional[subprocess.Popen] = None
         self.master_fd: Optional[int] = None
         self._reader_thread: Optional[threading.Thread] = None
         self._server_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._write_lock = threading.Lock()
+        self._output_stats_lock = threading.Lock()
+        self._output_bytes = 0
+        self._last_output_monotonic: Optional[float] = None
         self._server: Optional[socket.socket] = None
 
     def start(self) -> int:
@@ -223,29 +229,84 @@ class Supervisor(TerminalHost):
         assert self.master_fd is not None
         raw_path = self.run_dir / "terminal.raw.log"
         text_path = self.run_dir / "terminal.txt"
-        with raw_path.open("ab", buffering=0) as raw_handle, text_path.open(
-            "a", encoding="utf-8", errors="replace", buffering=1
-        ) as text_handle:
-            while not self._stop_event.is_set():
-                try:
-                    readable, _, _ = select.select([self.master_fd], [], [], 0.1)
-                    if self.master_fd not in readable:
-                        if self.process is not None and self.process.poll() is not None:
-                            break
-                        continue
-                    data = os.read(self.master_fd, 65536)
-                    if not data:
+        while not self._stop_event.is_set():
+            try:
+                readable, _, _ = select.select([self.master_fd], [], [], 0.1)
+                if self.master_fd not in readable:
+                    if self.process is not None and self.process.poll() is not None:
                         break
-                except OSError:
+                    continue
+                data = os.read(self.master_fd, 65536)
+                if not data:
                     break
-                raw_handle.write(data)
-                text_handle.write(data.decode("utf-8", errors="replace"))
-                text_handle.flush()
-                if self.passthrough:
-                    try:
-                        os.write(sys.stdout.fileno(), data)
-                    except OSError:
-                        pass
+            except OSError:
+                break
+            with self._output_stats_lock:
+                self._output_bytes += len(data)
+                self._last_output_monotonic = time.monotonic()
+            if self.log_policy.raw_log_enabled:
+                self._append_rotating_log(
+                    raw_path,
+                    data,
+                    max_bytes=self.log_policy.raw_log_max_bytes,
+                    backups=self.log_policy.raw_log_backups,
+                    log_kind="terminal.raw.log",
+                )
+            text_data = data.decode("utf-8", errors="replace").encode("utf-8")
+            self._append_rotating_log(
+                text_path,
+                text_data,
+                max_bytes=self.log_policy.terminal_log_max_bytes,
+                backups=self.log_policy.terminal_log_backups,
+                log_kind="terminal.txt",
+            )
+            if self.passthrough:
+                try:
+                    os.write(sys.stdout.fileno(), data)
+                except OSError:
+                    pass
+
+    def _append_rotating_log(
+        self,
+        path: Path,
+        data: bytes,
+        *,
+        max_bytes: int,
+        backups: int,
+        log_kind: str,
+    ) -> None:
+        original_size = path.stat().st_size if path.exists() else 0
+        rotated = original_size > 0 and original_size + len(data) > max_bytes
+        if rotated:
+            if backups > 0:
+                oldest = path.with_name("{}.{}".format(path.name, backups))
+                try:
+                    oldest.unlink()
+                except FileNotFoundError:
+                    pass
+                for index in range(backups - 1, 0, -1):
+                    source = path.with_name("{}.{}".format(path.name, index))
+                    target = path.with_name("{}.{}".format(path.name, index + 1))
+                    if source.exists():
+                        os.replace(str(source), str(target))
+                os.replace(
+                    str(path),
+                    str(path.with_name("{}.1".format(path.name))),
+                )
+            else:
+                path.unlink()
+            self._record_terminal_event(
+                "terminal_log_rotated",
+                {
+                    "log_kind": log_kind,
+                    "original_size": original_size,
+                    "max_bytes": max_bytes,
+                    "backups": backups,
+                },
+            )
+        bounded = data[-max_bytes:] if len(data) > max_bytes else data
+        with path.open("ab", buffering=0) as handle:
+            handle.write(bounded)
 
     def _serve_control(self) -> None:
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -294,11 +355,20 @@ class Supervisor(TerminalHost):
                 return {"status": "error", "message": str(error)}
             return {"status": "ok", "run_id": self.run_id}
         if action == "status":
+            with self._output_stats_lock:
+                output_bytes = self._output_bytes
+                last_output = self._last_output_monotonic
             return {
                 "status": "ok",
                 "run_id": self.run_id,
                 "pid": self.process.pid if self.process else None,
                 "running": bool(self.process and self.process.poll() is None),
+                "terminal_output_bytes": output_bytes,
+                "terminal_idle_seconds": (
+                    max(0.0, time.monotonic() - last_output)
+                    if last_output is not None
+                    else None
+                ),
             }
         if action == "stop":
             self._stop_event.set()

@@ -15,13 +15,24 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
 
 
+def resolve_runtime_root(
+    *,
+    environ: os._Environ[str] | dict[str, str] = os.environ,
+    home: Path | None = None,
+) -> Path:
+    """Resolve mutable runtime state independently from the plugin source."""
+    configured = environ.get("LOOPWEAVE_HOME")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    user_home = Path.home() if home is None else Path(home)
+    return (user_home / ".codex" / "loopweave").expanduser().resolve()
+
+
 LOOPWEAVE_SOURCE_ROOT = Path(
     os.environ.get("LOOPWEAVE_SOURCE_ROOT")
     or Path(__file__).resolve().parents[3]
 ).expanduser().resolve()
-LOOPWEAVE_HOME = Path(
-    os.environ.get("LOOPWEAVE_HOME") or LOOPWEAVE_SOURCE_ROOT
-).expanduser().resolve()
+LOOPWEAVE_HOME = resolve_runtime_root()
 LOOPWEAVE_SRC = LOOPWEAVE_SOURCE_ROOT / "src"
 if str(LOOPWEAVE_SRC) not in sys.path:
     sys.path.insert(0, str(LOOPWEAVE_SRC))

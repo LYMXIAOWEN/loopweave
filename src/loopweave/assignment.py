@@ -6,11 +6,12 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, List, Optional
+from typing import Callable, Dict, Iterable, List, Optional
 
 from .models import RunRecord, RunState
 from .protocol import append_event, utc_now
 from . import terminal_host
+from .runtime_config import RunPolicy, load_run_policy
 
 
 MAX_TASK_FILE_BYTES = 128 * 1024
@@ -41,6 +42,7 @@ class AssignmentResult:
     size: int
     sha256: str
     duplicate: bool
+    redelivered: bool = False
 
 
 def validate_task_file(path: Path, max_bytes: int = MAX_TASK_FILE_BYTES) -> TaskPacket:
@@ -100,6 +102,102 @@ def assignment_input_sequence(task_text: str) -> List[str]:
     return [format_assignment_message(task_text), "\r"]
 
 
+def wait_for_terminal_readiness(
+    run: RunRecord,
+    sender: Callable,
+    *,
+    events_path: Optional[Path] = None,
+    policy: Optional[RunPolicy] = None,
+) -> Dict[str, object]:
+    selected_policy = policy if policy is not None else load_run_policy()
+    started = time.monotonic()
+    deadline = started + (selected_policy.task_ready_timeout_ms / 1000.0)
+    fallback_after = (
+        started + (selected_policy.task_ready_fallback_ms / 1000.0)
+    )
+    quiet_seconds = selected_policy.task_ready_quiet_ms / 1000.0
+    reason = None
+    response: Dict[str, object] = {}
+    while time.monotonic() < deadline:
+        try:
+            raw_response = sender(
+                Path(run.socket_path),
+                {"token": run.control_token, "action": "status"},
+            )
+        except Exception as error:
+            raise AssignmentError(
+                "assignment delivery failed: terminal readiness probe failed: "
+                "{}".format(error)
+            ) from error
+        if not isinstance(raw_response, dict) or raw_response.get("status") != "ok":
+            message = (
+                raw_response.get("message", "unknown")
+                if isinstance(raw_response, dict)
+                else "invalid control response"
+            )
+            raise AssignmentError(
+                "assignment delivery failed: terminal readiness probe failed: "
+                "{}".format(message)
+            )
+        response = raw_response
+        response_run_id = response.get("run_id")
+        response_pid = response.get("pid")
+        response_running = response.get("running")
+        if response_run_id is not None and response_run_id != run.run_id:
+            raise AssignmentError(
+                "assignment delivery failed: terminal readiness probe "
+                "returned another run"
+            )
+        if response_pid is not None and response_pid != run.agent_pid:
+            raise AssignmentError(
+                "assignment delivery failed: terminal readiness probe "
+                "returned another process"
+            )
+        if response_running is False:
+            raise AssignmentError(
+                "assignment delivery failed: managed Agent exited before "
+                "terminal became ready"
+            )
+        output_bytes = response.get("terminal_output_bytes")
+        idle_seconds = response.get("terminal_idle_seconds")
+        if output_bytes is None and idle_seconds is None:
+            reason = "legacy_control_status"
+            break
+        if (
+            isinstance(output_bytes, int)
+            and output_bytes > 0
+            and isinstance(idle_seconds, (int, float))
+            and float(idle_seconds) >= quiet_seconds
+        ):
+            reason = "terminal_output_quiet"
+            break
+        if time.monotonic() >= fallback_after:
+            reason = (
+                "terminal_output_fallback"
+                if isinstance(output_bytes, int) and output_bytes > 0
+                else "no_output_fallback"
+            )
+            break
+        time.sleep(0.05)
+    if reason is None:
+        raise AssignmentError(
+            "assignment delivery failed: managed Agent terminal did not become ready"
+        )
+    if events_path is not None:
+        append_event(
+            events_path,
+            {
+                "event": "terminal_readiness_observed",
+                "run_id": run.run_id,
+                "reason": reason,
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+                "terminal_output_bytes": response.get("terminal_output_bytes"),
+                "terminal_idle_seconds": response.get("terminal_idle_seconds"),
+            },
+        )
+    return response
+
+
 def _safe_timestamp() -> str:
     return utc_now().replace(":", "").replace("+", "Z").replace(".", "-")
 
@@ -135,6 +233,7 @@ def assign_task(
     process_start_reader: Optional[Callable[[int], str]] = None,
     timestamp_factory: Callable[[], str] = _safe_timestamp,
     on_stale_run: Optional[Callable[[RunRecord], None]] = None,
+    redeliver: bool = False,
 ) -> AssignmentResult:
     require_assignable_state(run)
     packet = validate_task_file(task_file)
@@ -145,7 +244,11 @@ def assign_task(
     # Idempotent same-task retry (no-op) / different-task conflict (ADR 0002 s5).
     if latest_path.exists():
         existing_digest = hashlib.sha256(latest_path.read_bytes()).hexdigest()
-        if existing_digest == packet.sha256:
+        if existing_digest != packet.sha256:
+            raise AssignmentError(
+                "a different task is already assigned to run {}".format(run.run_id)
+            )
+        if not redeliver:
             return AssignmentResult(
                 run_id=run.run_id,
                 task_path=latest_path,
@@ -154,9 +257,6 @@ def assign_task(
                 sha256=packet.sha256,
                 duplicate=True,
             )
-        raise AssignmentError(
-            "a different task is already assigned to run {}".format(run.run_id)
-        )
     socket_path = Path(run.socket_path)
     _sender = sender if sender is not None else terminal_host.default_control_sender()
     reader = process_start_reader if process_start_reader is not None else terminal_host.default_process_identity_reader()
@@ -184,9 +284,48 @@ def assign_task(
     if not socket_path.exists():
         raise AssignmentError("control socket does not exist: {}".format(socket_path))
 
+    events_path = run_dir / "events.jsonl"
+    if redeliver:
+        append_event(
+            events_path,
+            {
+                "event": "assignment_redelivery_attempted",
+                "run_id": run.run_id,
+                "source_task_path": str(packet.path),
+                "latest_task_path": str(latest_path),
+                "size": packet.size,
+                "sha256": packet.sha256,
+            },
+        )
+        wait_for_terminal_readiness(
+            run,
+            _sender,
+            events_path=events_path,
+        )
+        _send_assignment_sequence(run, packet.text, _sender)
+        append_event(
+            events_path,
+            {
+                "event": "task_redelivered",
+                "run_id": run.run_id,
+                "source_task_path": str(packet.path),
+                "latest_task_path": str(latest_path),
+                "size": packet.size,
+                "sha256": packet.sha256,
+            },
+        )
+        return AssignmentResult(
+            run_id=run.run_id,
+            task_path=latest_path,
+            latest_path=latest_path,
+            size=packet.size,
+            sha256=packet.sha256,
+            duplicate=True,
+            redelivered=True,
+        )
+
     timestamp = timestamp_factory()
     history_path = run_dir / "assigned-task-{}.md".format(timestamp)
-    events_path = run_dir / "events.jsonl"
     data = packet.text.encode("utf-8")
     duplicate = _digest_was_assigned(events_path, packet.sha256)
     # Install the immutable run-scoped packet BEFORE delivery so a worker that
@@ -208,28 +347,12 @@ def assign_task(
     )
 
     try:
-        for index, input_text in enumerate(assignment_input_sequence(packet.text)):
-            if index:
-                time.sleep(0.35)
-            try:
-                response = _sender(
-                    socket_path,
-                    {
-                        "token": run.control_token,
-                        "action": "send",
-                        "text": input_text,
-                    },
-                )
-            except Exception as error:
-                raise AssignmentError(
-                    "assignment delivery failed: {}".format(error)
-                ) from error
-            if response.get("status") != "ok":
-                raise AssignmentError(
-                    "assignment delivery failed: {}".format(
-                        response.get("message", "unknown")
-                    )
-                )
+        wait_for_terminal_readiness(
+            run,
+            _sender,
+            events_path=events_path,
+        )
+        _send_assignment_sequence(run, packet.text, _sender)
     except Exception:
         # Roll back the partial packet so a failed delivery records no
         # assignment (history + assignment_attempted remain as an audit of the
@@ -261,3 +384,35 @@ def assign_task(
         sha256=packet.sha256,
         duplicate=duplicate,
     )
+
+
+def _send_assignment_sequence(
+    run: RunRecord,
+    task_text: str,
+    sender: Callable,
+) -> None:
+    for index, input_text in enumerate(assignment_input_sequence(task_text)):
+        if index:
+            time.sleep(0.35)
+        try:
+            response = sender(
+                Path(run.socket_path),
+                {
+                    "token": run.control_token,
+                    "action": "send",
+                    "text": input_text,
+                },
+            )
+        except Exception as error:
+            raise AssignmentError(
+                "assignment delivery failed: {}".format(error)
+            ) from error
+        if not isinstance(response, dict) or response.get("status") != "ok":
+            message = (
+                response.get("message", "unknown")
+                if isinstance(response, dict)
+                else "invalid control response"
+            )
+            raise AssignmentError(
+                "assignment delivery failed: {}".format(message)
+            )

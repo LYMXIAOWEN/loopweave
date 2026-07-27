@@ -101,6 +101,42 @@ class ClaudeStopHookTests(unittest.TestCase):
             self.registry.get_run("run-1").state, RunState.READY_FOR_REVIEW
         )
 
+    def test_stop_hook_ignores_explicit_submission_already_ready_for_review(
+        self,
+    ) -> None:
+        self.registry.force_state("run-1", RunState.READY_FOR_REVIEW)
+        pending_card = self.run_dir / "review-inbox" / "review-request-1.json"
+        pending_card.parent.mkdir()
+        pending_card.write_text('{"review_id":"review-request-1"}\n', encoding="utf-8")
+        dispatched = []
+
+        result = handle_claude_stop(
+            "run-1",
+            {
+                "last_assistant_message": "LOOPWEAVE_STAGE\nAlready submitted.",
+                "transcript_path": str(self.root / "missing-transcript.jsonl"),
+            },
+            self.registry,
+            lambda run: dispatched.append(run.run_id),
+        )
+
+        self.assertEqual(result, "ready_for_review")
+        self.assertEqual(dispatched, [])
+        self.assertEqual(
+            self.registry.get_run("run-1").state, RunState.READY_FOR_REVIEW
+        )
+        self.assertEqual(
+            pending_card.read_text(encoding="utf-8"),
+            '{"review_id":"review-request-1"}\n',
+        )
+        events = [
+            json.loads(line)
+            for line in (self.run_dir / "events.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        self.assertEqual(events[-1]["event"], "stop_hook_ignored_ready_for_review")
+
     def test_visible_backend_queues_card_without_dispatch(self) -> None:
         with self.registry._connect() as connection:
             connection.execute(
