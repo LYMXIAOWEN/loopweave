@@ -301,6 +301,36 @@ class WindowsConPtyRealTests(unittest.TestCase):
         self.assertFalse(host._is_alive())
         host.stop()
 
+    def test_control_stop_terminates_stubborn_child(self) -> None:
+        """The control-channel stop action must enforce termination even when
+        the child ignores Ctrl+C (sleep fixture): graceful Ctrl+C first, then
+        process-tree termination."""
+        from loopweave.control_transport import send_control_message
+
+        fixture = self._fixture(
+            "import time\nprint('STARTED', flush=True)\ntime.sleep(600)\n"
+        )
+        host = self._host([sys.executable, "-u", str(fixture)])
+        try:
+            host.start()
+            time.sleep(1.5)
+            self.assertTrue(host._is_alive())
+            response = send_control_message(
+                host.pipe_name,
+                {"token": "secret-token", "action": "stop"},
+                timeout=3.0,
+            )
+            self.assertEqual(response["status"], "ok")
+            deadline = time.monotonic() + 12.0
+            while time.monotonic() < deadline and host._is_alive():
+                time.sleep(0.1)
+            self.assertFalse(
+                host._is_alive(),
+                "control stop must terminate a stubborn child",
+            )
+        finally:
+            host.stop()
+
     def test_process_identity_matches_started_pid(self) -> None:
         fixture = self._fixture(
             "import time\nprint('READY', flush=True)\ntime.sleep(10)\n"

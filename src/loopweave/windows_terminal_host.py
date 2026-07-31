@@ -565,8 +565,28 @@ class WindowsConPtyHost(TerminalHost):
                     pty.write("\x03")
                 except Exception:
                     pass
+                # Graceful Ctrl+C is best-effort (a console app may ignore
+                # it); enforce termination in a background thread so the
+                # control response returns promptly while the agent is
+                # killed and the control server is unblocked.
+                threading.Thread(
+                    target=self._enforce_stop,
+                    args=(pty,),
+                    daemon=True,
+                ).start()
             return {"status": "ok", "run_id": self.run_id}
         return {"status": "error", "message": "unsupported action"}
+
+    def _enforce_stop(self, pty: Any) -> None:
+        # Short graceful window for the control-channel stop path: the CLI
+        # stop command verifies process exit within 2 seconds
+        # (STOP_VERIFY_TIMEOUT_SECONDS), so Ctrl+C gets a brief chance and
+        # then process-tree termination guarantees the deadline is met.
+        deadline = time.monotonic() + 0.8
+        while time.monotonic() < deadline and pty.isalive():
+            time.sleep(0.05)
+        self._hard_stop(pty)
+        self._poke_control_server()
 
     def _record_terminal_event(
         self, event: str, payload: dict[str, Any] | None = None

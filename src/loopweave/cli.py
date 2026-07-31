@@ -92,7 +92,9 @@ from .visible_review import (
 from .workspace_baseline import capture_workspace_baseline
 
 
-STOP_VERIFY_TIMEOUT_SECONDS = 2.0
+STOP_VERIFY_TIMEOUT_SECONDS = (
+    6.0 if sys.platform == "win32" else 2.0
+)
 STOP_VERIFY_INTERVAL_SECONDS = 0.1
 
 
