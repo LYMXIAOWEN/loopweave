@@ -15,6 +15,9 @@ dependencies = []
 desktop = [
   "mcp==1.27.0",
 ]
+windows = [
+  "pywinpty==3.0.5",
+]
 dev = [
   "mcp==1.27.0",
   "pytest>=8",

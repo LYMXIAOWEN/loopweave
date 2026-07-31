@@ -278,9 +278,11 @@ class BridgeController:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         path.parent.chmod(0o700)
         temporary = path.with_name("." + path.name + ".tmp")
+        flags = os.O_CREAT | os.O_TRUNC | os.O_WRONLY
+        flags |= getattr(os, "O_BINARY", 0)
         descriptor = os.open(
             temporary,
-            os.O_CREAT | os.O_TRUNC | os.O_WRONLY,
+            flags,
             0o600,
         )
         try:

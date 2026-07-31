@@ -22,6 +22,52 @@ from unittest.mock import patch
 
 SRC_ROOT = Path(__file__).resolve().parents[1] / "src"
 
+
+class _FakeBackend:
+    ConPTY = 0
+    WinPTY = 1
+
+
+class _FakePTY:
+    """Synthetic stand-in for winpty.PTY used by the Windows contract tests.
+
+    Keeps the Windows backend reachable on any host (including POSIX CI)
+    without touching a real ConPTY.  The fake child is always dead so the
+    host lifecycle completes without a live process.
+    """
+
+    def __init__(self, cols: int, rows: int, backend=None, **kwargs) -> None:
+        self._fake_pid = 424242
+
+    @property
+    def pid(self) -> int:
+        return self._fake_pid
+
+    def spawn(self, appname, cmdline=None, cwd=None, env=None) -> bool:
+        return True
+
+    def read(self, blocking: bool = False) -> str:
+        return ""
+
+    def write(self, to_write: str) -> int:
+        return len(to_write)
+
+    def set_size(self, cols: int, rows: int) -> None:
+        pass
+
+    def isalive(self) -> bool:
+        return False
+
+    def iseof(self) -> bool:
+        return False
+
+    def get_exitstatus(self) -> int:
+        return 0
+
+    def cancel_io(self) -> bool:
+        return True
+
+
 # Uses importlib.abc.MetaPathFinder's find_spec() protocol, not the legacy
 # find_module()/load_module() fallback that Python 3.12 removed from
 # sys.meta_path handling (see cpython commit 5c238225 "[3.12] gh-112419:
@@ -213,7 +259,45 @@ class TerminalHostFactoryContractTests(unittest.TestCase):
             finally:
                 host.stop()
 
-    def test_win32_platform_raises_actionable_capability_error(self) -> None:
+    def test_win32_platform_returns_windows_backend_when_winpty_available(
+        self,
+    ) -> None:
+        """On win32 the factory returns the Windows ConPTY host, never the
+        POSIX Supervisor, when the optional ``windows`` extra is present."""
+        from loopweave.terminal_host import TerminalHost, create_terminal_host
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch(
+                "loopweave.terminal_host.sys.platform", "win32"
+            ), patch(
+                "loopweave.windows_terminal_host.PTY", _FakePTY
+            ), patch(
+                "loopweave.windows_terminal_host.Backend", _FakeBackend
+            ):
+                host = create_terminal_host(
+                    run_id="run-1",
+                    command=["cmd.exe"],
+                    cwd=root,
+                    run_dir=root / "run",
+                    socket_path=Path(
+                        r"\\.\pipe\loopweave-control-run-1-test"
+                    ),
+                    control_token="secret",
+                )
+            try:
+                self.assertIsInstance(host, TerminalHost)
+                self.assertEqual(
+                    type(host).__name__, "WindowsConPtyHost"
+                )
+            finally:
+                host.stop()
+
+    def test_win32_platform_raises_actionable_capability_error_when_backend_missing(
+        self,
+    ) -> None:
+        """Without the ``windows`` extra the factory must fail closed with an
+        actionable UnsupportedPlatformError instead of a broken host."""
         from loopweave.terminal_host import (
             UnsupportedPlatformError,
             create_terminal_host,
@@ -221,19 +305,23 @@ class TerminalHostFactoryContractTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            with patch("loopweave.terminal_host.sys.platform", "win32"):
+            with patch(
+                "loopweave.terminal_host.sys.platform", "win32"
+            ), patch("loopweave.windows_terminal_host.PTY", None):
                 with self.assertRaises(UnsupportedPlatformError) as raised:
                     create_terminal_host(
                         run_id="run-1",
                         command=["cmd.exe"],
                         cwd=root,
                         run_dir=root / "run",
-                        socket_path=root / "control.sock",
+                        socket_path=Path(
+                            r"\\.\pipe\loopweave-control-run-1-test"
+                        ),
                         control_token="secret",
                     )
         message = str(raised.exception).lower()
         self.assertIn("windows", message)
-        self.assertNotIn("conpty is implemented", message)
+        self.assertIn("extra", message)
 
 
 class RunAgentUsesFactoryContractTests(unittest.TestCase):
@@ -329,14 +417,15 @@ class RunAgentUsesFactoryContractTests(unittest.TestCase):
             self.assertEqual(created_run.agent_pid, fake_pid)
             self.assertEqual(created_run.agent_process_start, fake_process_start)
 
-    def test_run_agent_fails_closed_on_win32_before_any_supervisor_use(
-        self,
-    ) -> None:
+    def test_run_agent_routes_to_windows_backend_on_win32(self) -> None:
+        """On win32 ``_run_agent`` must drive the Windows ConPTY backend and
+        a named-pipe control endpoint, and must never touch the POSIX
+        Supervisor."""
         from types import SimpleNamespace
 
         from loopweave.cli import _run_agent
+        from loopweave.models import RunState
         from loopweave.registry import Registry
-        from loopweave.terminal_host import UnsupportedPlatformError
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
@@ -367,18 +456,34 @@ class RunAgentUsesFactoryContractTests(unittest.TestCase):
             ), patch(
                 "loopweave.terminal_host.sys.platform", "win32"
             ), patch(
+                "loopweave.windows_terminal_host.PTY", _FakePTY
+            ), patch(
+                "loopweave.windows_terminal_host.Backend", _FakeBackend
+            ), patch(
+                "loopweave.terminal_host.default_process_identity_reader",
+                return_value=lambda pid: "fake-process-start",
+            ), patch(
                 "loopweave.supervisor.Supervisor",
                 side_effect=AssertionError(
-                    "no Supervisor/pty operation may run on an "
-                    "unsupported platform before the capability error"
+                    "no Supervisor/pty operation may run on win32; "
+                    "the Windows backend owns the platform"
                 ),
             ):
-                with self.assertRaises(UnsupportedPlatformError):
-                    _run_agent(args)
+                exit_code = _run_agent(args)
 
-            self.assertEqual(registry.list_runs(), [])
+            self.assertEqual(exit_code, 0)
+            created_runs = registry.list_runs()
+            self.assertEqual(len(created_runs), 1)
+            created = created_runs[0]
+            self.assertTrue(
+                created.socket_path.startswith(r"\\.\pipe\loopweave-control-"),
+                "run must advertise a Windows named-pipe control endpoint",
+            )
+            self.assertEqual(created.agent_pid, 424242)
+            self.assertEqual(created.state, RunState.STOPPED)
 
 
+@unittest.skipIf(sys.platform == "win32", "POSIX pty required")
 class TerminalHostPosixParityContractTests(unittest.TestCase):
     """ADR 0001 section 1: the POSIX backend keeps its current PTY/socket
     behavior when reached through the new factory/base-class boundary."""
@@ -552,6 +657,7 @@ class TerminalHostPosixParityContractTests(unittest.TestCase):
             self.assertEqual(identity_start, expected_start)
 
 
+@unittest.skipIf(sys.platform == "win32", "POSIX pty required")
 class SubmissionServiceContractTests(unittest.TestCase):
     """ADR 0001 sections 3-4: a structured submission path usable from
     inside a managed session, reusing the existing state/review machinery
@@ -1954,38 +2060,18 @@ class ControlSenderLazyResolutionContractTests(unittest.TestCase):
     def test_assign_task_default_sender_resolves_lazily_not_at_import(
         self,
     ) -> None:
-        """Importing assignment.py under a win32-simulated platform must
-        succeed; only calling assign_task() without an explicit sender may
-        raise UnsupportedPlatformError, and only at the call."""
-        from loopweave.models import RunRecord, RunState
+        """Importing assignment.py must succeed on every platform; the
+        default control sender resolves lazily at call time through
+        terminal_host.default_control_sender(), and on win32 it is the
+        Windows named-pipe transport, never the POSIX supervisor sender."""
+        import loopweave.control_transport as control_transport_module
+        from loopweave.terminal_host import default_control_sender
 
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            task = root / "task.md"
-            task.write_text("# Task\n", encoding="utf-8")
-            run = RunRecord(
-                run_id="run-1",
-                codex_thread_id="thread-1",
-                cwd=str(root),
-                thread_cwd=str(root),
-                workspace_root=str(root),
-                tty="/dev/test",
-                agent="claude",
-                agent_pid=123,
-                agent_process_start="start",
-                control_token="secret",
-                state=RunState.RUNNING,
-                run_dir=str(root / "run"),
-                socket_path=str(root / "control.sock"),
-            )
-            (root / "control.sock").write_text("", encoding="utf-8")
-
-            from loopweave.assignment import assign_task
-            from loopweave.terminal_host import UnsupportedPlatformError
-
-            with patch("loopweave.terminal_host.sys.platform", "win32"):
-                with self.assertRaises(UnsupportedPlatformError):
-                    assign_task(run, task)
+        with patch("loopweave.terminal_host.sys.platform", "win32"):
+            sender = default_control_sender()
+        self.assertIs(
+            sender, control_transport_module.send_control_message
+        )
 
     def test_completion_notifier_default_sender_resolves_at_construction_not_import(
         self,
@@ -1993,16 +2079,18 @@ class ControlSenderLazyResolutionContractTests(unittest.TestCase):
         """CompletionNotifier() itself resolves its default sender when no
         explicit sender is passed (ADR 0001 section 2b: 'construction
         time'). Importing the module must succeed regardless of platform;
-        only constructing with no sender on an unsupported platform raises
-        - and it raises the specific, actionable UnsupportedPlatformError
-        rather than a generic notification-failed message, which is more
-        useful to an operator than swallowing it (invariant 6)."""
+        on win32 construction resolves the Windows named-pipe sender."""
         import loopweave.completion_notifier as completion_notifier_module
-        from loopweave.terminal_host import UnsupportedPlatformError
+        import loopweave.control_transport as control_transport_module
 
         with patch("loopweave.terminal_host.sys.platform", "win32"):
-            with self.assertRaises(UnsupportedPlatformError):
-                completion_notifier_module.CompletionNotifier()
+            notifier = completion_notifier_module.CompletionNotifier(
+                process_start=lambda pid: "fake-start-time",
+            )
+        self.assertIs(
+            notifier.sender,
+            control_transport_module.send_control_message,
+        )
 
     def test_completion_notifier_accepts_explicit_sender_on_any_platform(
         self,
@@ -2335,21 +2423,17 @@ class ProcessIdentityProviderContractTests(unittest.TestCase):
 
         self.assertIs(reader, process_start_time)
 
-    def test_default_process_identity_reader_raises_on_win32_before_import(
+    def test_default_process_identity_reader_resolves_windows_reader_on_win32(
         self,
     ) -> None:
-        """On a simulated win32 platform, the function must raise before
-        importing supervisor.process_start_time at all - proven the same
-        way section 2's default_control_sender win32 test is proven."""
-        from loopweave.terminal_host import (
-            UnsupportedPlatformError,
-            default_process_identity_reader,
-        )
+        """On win32 the default process-identity reader is the Windows
+        GetProcessTimes implementation, never the POSIX ``ps`` lookup."""
+        import loopweave.windows_terminal_host as windows_host_module
+        from loopweave.terminal_host import default_process_identity_reader
 
         with patch("loopweave.terminal_host.sys.platform", "win32"):
-            with self.assertRaises(UnsupportedPlatformError) as raised:
-                default_process_identity_reader()
-        self.assertIn("windows", str(raised.exception).lower())
+            reader = default_process_identity_reader()
+        self.assertIs(reader, windows_host_module.process_start_time)
 
     def test_completion_notifier_process_start_resolves_through_shared_provider(
         self,
@@ -2658,6 +2742,7 @@ class CliDeliveryPathsUseSharedControlSenderContractTests(unittest.TestCase):
             self.assertTrue(sent)
 
 
+@unittest.skipIf(sys.platform == "win32", "POSIX pty required")
 class RunIdentityEnvironmentContractTests(unittest.TestCase):
     """ADR 0001 section 4: the managed child receives a bounded, non-secret
     run identity through LOOPWEAVE_RUN_ID at spawn time."""

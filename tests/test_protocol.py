@@ -39,7 +39,10 @@ class ProtocolTests(unittest.TestCase):
         append_event(path, {"event": "created"})
         append_event(path, {"event": "running"})
 
-        events = [json.loads(line) for line in path.read_text().splitlines()]
+        events = [
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+        ]
         self.assertEqual([event["event"] for event in events], ["created", "running"])
         self.assertTrue(all("timestamp" in event for event in events))
 

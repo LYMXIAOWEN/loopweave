@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -64,9 +65,21 @@ def create_terminal_host(
     passthrough: bool = True,
 ) -> TerminalHost:
     if sys.platform == "win32":
-        raise UnsupportedPlatformError(
-            "native Windows terminal hosting (ConPTY) is not implemented "
-            "in this package; LoopWeave currently requires macOS or Linux"
+        try:
+            from .windows_terminal_host import WindowsConPtyHost
+        except ImportError as error:
+            raise UnsupportedPlatformError(
+                "native Windows terminal hosting requires the 'windows' "
+                "extra; install with: pip install 'loopweave[windows]'"
+            ) from error
+        return WindowsConPtyHost(
+            run_id=run_id,
+            command=command,
+            cwd=cwd,
+            run_dir=run_dir,
+            socket_path=socket_path,
+            control_token=control_token,
+            passthrough=passthrough,
         )
     from .supervisor import Supervisor
 
@@ -83,10 +96,9 @@ def create_terminal_host(
 
 def default_control_sender() -> ControlSender:
     if sys.platform == "win32":
-        raise UnsupportedPlatformError(
-            "control-message delivery to a managed session is not "
-            "implemented on Windows in this package"
-        )
+        from .control_transport import send_control_message
+
+        return send_control_message
     from .supervisor import send_control_message
 
     return send_control_message
@@ -94,10 +106,38 @@ def default_control_sender() -> ControlSender:
 
 def default_process_identity_reader() -> ProcessIdentityReader:
     if sys.platform == "win32":
-        raise UnsupportedPlatformError(
-            "process-identity lookup for a managed session is not "
-            "implemented on Windows in this package"
-        )
+        try:
+            from .windows_terminal_host import process_start_time
+        except ImportError as error:
+            raise UnsupportedPlatformError(
+                "native Windows process identity requires the 'windows' "
+                "extra; install with: pip install 'loopweave[windows]'"
+            ) from error
+        return process_start_time
     from .supervisor import process_start_time
 
     return process_start_time
+
+
+def pid_alive(pid: int) -> bool:
+    """Portable existence probe that never signals the target process.
+
+    ``os.kill(pid, 0)`` is unsafe on Windows because signal 0 is the
+    ``CTRL_C_EVENT`` constant and would broadcast Ctrl+C to the console;
+    the Windows backend therefore probes with ``OpenProcess`` instead.
+    """
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        from .windows_terminal_host import process_alive
+
+        return process_alive(pid)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True

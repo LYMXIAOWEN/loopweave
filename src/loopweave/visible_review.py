@@ -353,13 +353,9 @@ def _submitter_lock_owner_is_dead(lock: Path) -> bool:
         return False
     if owner_pid <= 0:
         return False
-    try:
-        os.kill(owner_pid, 0)
-    except ProcessLookupError:
-        return True
-    except PermissionError:
-        return False
-    return False
+    from .terminal_host import pid_alive
+
+    return not pid_alive(owner_pid)
 
 
 def _acquire_submit_lock(inbox: Path) -> Path:
@@ -367,7 +363,9 @@ def _acquire_submit_lock(inbox: Path) -> Path:
     lock = inbox / "pending.submit.lock"
     for attempt in range(2):
         try:
-            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+            flags |= getattr(os, "O_BINARY", 0)
+            fd = os.open(lock, flags, 0o600)
         except FileExistsError as error:
             if attempt == 0 and _submitter_lock_owner_is_dead(lock):
                 try:

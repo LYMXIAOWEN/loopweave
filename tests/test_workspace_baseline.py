@@ -21,6 +21,8 @@ class WorkspaceBaselineTests(unittest.TestCase):
             ["git", "-C", str(self.root), *args],
             check=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
         )
 
@@ -28,14 +30,20 @@ class WorkspaceBaselineTests(unittest.TestCase):
         self._git("init")
         self._git("config", "user.name", "LoopWeave Test")
         self._git("config", "user.email", "loopweave@example.invalid")
-        (self.root / "tracked.txt").write_text("base\n", encoding="utf-8")
+        (self.root / "tracked.txt").write_text(
+            "base\n", encoding="utf-8", newline="\n"
+        )
         self._git("add", "tracked.txt")
         self._git("commit", "-m", "base")
 
     def test_dirty_git_workspace_records_patch_and_untracked_hashes(self) -> None:
         self._init_repo()
-        (self.root / "tracked.txt").write_text("changed\n", encoding="utf-8")
-        (self.root / "new.txt").write_text("new\n", encoding="utf-8")
+        (self.root / "tracked.txt").write_text(
+            "changed\n", encoding="utf-8", newline="\n"
+        )
+        (self.root / "new.txt").write_text(
+            "new\n", encoding="utf-8", newline="\n"
+        )
         before = self._git("status", "--porcelain=v1").stdout
 
         payload = capture_workspace_baseline(self.root)

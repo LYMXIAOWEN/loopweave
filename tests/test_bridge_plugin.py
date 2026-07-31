@@ -1,4 +1,6 @@
 from __future__ import annotations
+import pytest
+import sys
 
 import json
 import subprocess
@@ -16,6 +18,7 @@ def _runner(responses, calls):
     return run
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX codex bundle path assumed")
 def test_install_reuses_configured_marketplace_and_adds_plugin(tmp_path: Path):
     calls = []
     responses = [
@@ -46,6 +49,7 @@ def test_install_reuses_configured_marketplace_and_adds_plugin(tmp_path: Path):
     ]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX codex bundle path assumed")
 def test_install_adds_missing_marketplace_before_plugin(tmp_path: Path):
     calls = []
     responses = [
@@ -72,6 +76,7 @@ def test_install_adds_missing_marketplace_before_plugin(tmp_path: Path):
     ]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX codex bundle path assumed")
 def test_install_refreshes_existing_plugin_cache(tmp_path: Path):
     calls = []
     responses = [
@@ -116,6 +121,7 @@ def test_install_refreshes_existing_plugin_cache(tmp_path: Path):
     ]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX codex bundle path assumed")
 def test_dry_run_and_uninstall_do_not_touch_marketplace(tmp_path: Path):
     calls = []
     manager = BridgePluginManager(

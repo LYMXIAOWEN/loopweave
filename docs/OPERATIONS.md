@@ -1,7 +1,7 @@
 # LoopWeave Run 运维手册
 
-本文面向在 macOS 与 Codex Desktop 上维护 LoopWeave 的操作者，说明运行目录、
-保留策略、人工归档、自动维护和故障处置。日常任务与审查命令见
+本文面向在 macOS / Windows 与 Codex Desktop 上维护 LoopWeave 的操作者，说明
+运行目录、保留策略、人工归档、自动维护和故障处置。日常任务与审查命令见
 [命令参考](CLI_REFERENCE.md)。
 
 ## 数据边界

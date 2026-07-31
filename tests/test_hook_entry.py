@@ -572,9 +572,13 @@ class ClaudeStopHookTests(unittest.TestCase):
         )
 
         self.assertEqual(result, "visible-review-pending")
-        review_id = (self.run_dir / "review-inbox" / "pending").read_text().strip()
+        review_id = (
+            self.run_dir / "review-inbox" / "pending"
+        ).read_text(encoding="utf-8").strip()
         card = json.loads(
-            (self.run_dir / "review-inbox" / f"{review_id}.json").read_text()
+            (self.run_dir / "review-inbox" / f"{review_id}.json").read_text(
+                encoding="utf-8"
+            )
         )
         encoded = json.dumps(card, ensure_ascii=False).encode("utf-8")
         self.assertLessEqual(len(encoded), MAX_REVIEW_CARD_BYTES)

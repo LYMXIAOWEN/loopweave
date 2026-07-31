@@ -40,14 +40,40 @@ tree.
 
 The core imports cleanly on a non-POSIX platform because POSIX-only modules
 (`pty`, `termios`, `tty`, `fcntl`) are guarded or resolved lazily through
-`terminal_host`. Adding a Windows backend later means implementing one
-`TerminalHost` plus Windows-specific providers — not editing the call sites.
+`terminal_host`. The Windows backend implements the same `TerminalHost`
+contract plus platform providers — the call sites are shared:
 
-Native Windows execution is **not supported** in this package. On a simulated or
-real `win32` platform, starting a managed session, delivering a control
-message, or checking worker liveness raises `UnsupportedPlatformError` before
-any POSIX syscall. Do not describe Windows as working until a ConPTY package
-passes its suite on real Windows.
+- `windows_terminal_host.WindowsConPtyHost` — ConPTY managed session via
+  `pywinpty` (import name `winpty`, `Backend.ConPTY`). Requires the optional
+  `windows` extra; without it the factory raises an actionable
+  `UnsupportedPlatformError` instead of pretending to work.
+- `control_transport` — control endpoints: Unix domain socket on POSIX,
+  per-run named pipe (`\\.\pipe\loopweave-control-{run_id}-...`) on Windows.
+  The registry/`run.json` `socket_path` field stores the endpoint string on
+  both platforms, so no database migration is needed.
+- `file_lock` — blocking/non-blocking exclusive locks (`fcntl.flock` on
+  POSIX, `msvcrt.locking` on Windows).
+- `win32_pipe` — minimal ctypes named-pipe client/server used by the control
+  channel and by `desktop_ipc` for `\\.\pipe\codex-ipc`.
+
+Windows notes for developers:
+
+- `os.kill(pid, 0)` is **unsafe on Windows** (signal 0 is `CTRL_C_EVENT` and
+  broadcasts Ctrl+C); use `terminal_host.pid_alive()` instead.
+- `os.ttyname` and `os.getuid` do not exist on Windows; platform-guard them.
+- text-mode `Path.write_text()`/`read_text()` default to the locale encoding
+  on Windows; pass `encoding="utf-8"` (and `newline="\n"` when exact bytes
+  matter).
+- POSIX `with sqlite3.connect(...)` never closes the handle; Windows keeps the
+  database file locked until close, so registry connections use a closing
+  connection factory.
+- Windows tests that need real ConPTY/named pipes are gated with
+  `unittest.skipUnless(sys.platform == "win32", ...)`; POSIX-only tests
+  (`pty`, `AF_UNIX`, permission-bit assertions, `/opt` bundle paths) are
+  skipped on win32 and still run unchanged on POSIX CI.
+
+Do not describe Windows as supported until the native acceptance matrix
+passes on a real Windows machine.
 
 ## Generic-worker launch, assignment, and recovery
 

@@ -281,8 +281,12 @@ def assign_task(
             if on_stale_run is not None:
                 on_stale_run(run)
             raise AssignmentError("managed Agent process identity changed")
-    if not socket_path.exists():
-        raise AssignmentError("control socket does not exist: {}".format(socket_path))
+    from .control_transport import control_endpoint_available
+
+    if not control_endpoint_available(socket_path):
+        raise AssignmentError(
+            "control endpoint is unavailable: {}".format(socket_path)
+        )
 
     events_path = run_dir / "events.jsonl"
     if redeliver:

@@ -85,6 +85,26 @@ ALLOWED_TRANSITIONS: Dict[RunState, Set[RunState]] = {
 }
 
 
+class _ClosingConnection(sqlite3.Connection):
+    """sqlite3 connection whose ``with`` exit also closes the handle.
+
+    The standard ``with connection:`` form commits on success / rolls back on
+    error but leaves the handle open until garbage collection; Windows keeps
+    the database file locked while any handle is open, so tests and tools that
+    clean up ``registry.sqlite`` on disk need deterministic close here.
+    """
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            if exc_type is None:
+                self.commit()
+            else:
+                self.rollback()
+        finally:
+            self.close()
+        return False
+
+
 class Registry:
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
@@ -92,7 +112,7 @@ class Registry:
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(str(self.path))
+        connection = sqlite3.connect(str(self.path), factory=_ClosingConnection)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA foreign_keys=ON")

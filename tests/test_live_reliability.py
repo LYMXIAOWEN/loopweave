@@ -191,6 +191,7 @@ class OrphanProvenanceContractTests(unittest.TestCase):
 # 2. probe classification
 # --------------------------------------------------------------------------- #
 class LivenessProbeContractTests(unittest.TestCase):
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_probe_alive_for_authenticated_matching_live_session(self) -> None:
         from loopweave.liveness import probe_control_liveness
 
@@ -265,6 +266,7 @@ class LivenessProbeContractTests(unittest.TestCase):
 # 3. reconcile transition matrix
 # --------------------------------------------------------------------------- #
 class ReconcileLivenessContractTests(unittest.TestCase):
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_alive_identity_match_leaves_run_running(self) -> None:
         from loopweave.liveness import reconcile_liveness
 
@@ -277,6 +279,7 @@ class ReconcileLivenessContractTests(unittest.TestCase):
             finally:
                 supervisor.stop()
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_transient_reader_failure_with_alive_control_does_not_orphan(self) -> None:
         from loopweave.liveness import reconcile_liveness
 
@@ -293,6 +296,7 @@ class ReconcileLivenessContractTests(unittest.TestCase):
             finally:
                 supervisor.stop()
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_identity_mismatch_with_alive_control_orphans_fail_closed(self) -> None:
         from loopweave.liveness import reconcile_liveness
 
@@ -414,6 +418,7 @@ class RecoverOrphanedContractTests(unittest.TestCase):
             reason_category="identity_mismatch",
         )
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_recover_restores_assignable_orphan_when_session_confirmed_alive(self) -> None:
         from loopweave.liveness import recover_orphaned
 
@@ -486,6 +491,7 @@ class RecoverOrphanedContractTests(unittest.TestCase):
             )
             self.assertEqual(registry.get_run("run-1").state, RunState.ORPHANED)
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_recover_refuses_identity_mismatch_even_with_alive_control(self) -> None:
         from loopweave.liveness import recover_orphaned
 
@@ -508,6 +514,9 @@ class RecoverOrphanedContractTests(unittest.TestCase):
             finally:
                 supervisor.stop()
 
+    @unittest.skipIf(
+        sys.platform == "win32", "POSIX pty required"
+    )
     def test_recover_refuses_every_in_flight_or_pending_prior_state(self) -> None:
         """ADR 0002 section 4: recovery is refused for EVERY in-flight or
         pending-review prior state, not only REVIEW_READY."""
@@ -984,6 +993,7 @@ class TaskProvenanceContractTests(unittest.TestCase):
                 "marker in status output",
             )
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_taskless_premature_submit_gives_actionable_guidance(self) -> None:
         from loopweave.submission import SubmissionError, submit_stage
 
@@ -1021,6 +1031,7 @@ class TaskProvenanceContractTests(unittest.TestCase):
 # 8. recovery entry points in the public workflow (ADR section 4)
 # --------------------------------------------------------------------------- #
 class RecoveryEntryPointContractTests(unittest.TestCase):
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_status_restores_an_exact_live_false_orphan_without_sqlite_edits(self) -> None:
         """ADR 0002 section 4: the normal public workflow (selected-run status,
         or an explicit recover command) must restore an exact live false
@@ -1062,6 +1073,7 @@ class RecoveryEntryPointContractTests(unittest.TestCase):
         self.assertEqual(args.command, "recover")
         self.assertEqual(args.run_id, "run-1")
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_recover_command_restores_an_exact_live_false_orphan(self) -> None:
         from loopweave.liveness import audit_orphan
         from loopweave.cli import main
@@ -1277,6 +1289,7 @@ class BoundedAuditContractTests(unittest.TestCase):
 # 11. crash-consistency of the orphan transition (ADR section 7)
 # --------------------------------------------------------------------------- #
 class CrashConsistencyContractTests(unittest.TestCase):
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_orphan_remains_recoverable_when_event_write_fails(self) -> None:
         """ADR 0002 section 7: the durable provenance + state precede the event
         write, so an event-write failure must not make recovery impossible. The
@@ -1332,6 +1345,7 @@ class CrashConsistencyContractTests(unittest.TestCase):
             finally:
                 supervisor.stop()
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_recovery_force_state_failure_leaves_no_completed_recovered_event(
         self,
     ) -> None:
@@ -1443,6 +1457,7 @@ class CrashConsistencyContractTests(unittest.TestCase):
                 "the durable provenance must exist before force_state(ORPHANED)",
             )
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_recovery_event_failure_then_reconcile_completes_audit(self) -> None:
         """ADR 0002 section 7 (idempotent completion): the real crash window is
         force_state(restored) succeeding while the run_recovered append fails.
@@ -1520,6 +1535,7 @@ class CrashConsistencyContractTests(unittest.TestCase):
             finally:
                 supervisor.stop()
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_recovery_clear_failure_leaves_run_restored_audited_with_provenance(
         self,
     ) -> None:
@@ -1578,6 +1594,7 @@ class AuditSchemaContractTests(unittest.TestCase):
     }
     _STATE_VALUES = {s.value for s in RunState}
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_orphan_and_recovery_events_carry_complete_schema(self) -> None:
         """The task packet's minimum audit contract: both run_orphaned and
         run_recovered events must carry a non-empty bounded source, a fixed
@@ -1648,6 +1665,7 @@ class ProvenanceValidationContractTests(unittest.TestCase):
             "rejected provenance must be left intact",
         )
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_recover_rejects_provenance_with_wrong_run_id(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1658,6 +1676,7 @@ class ProvenanceValidationContractTests(unittest.TestCase):
             finally:
                 supervisor.stop()
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_recover_rejects_provenance_with_missing_transition_id(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1668,6 +1687,7 @@ class ProvenanceValidationContractTests(unittest.TestCase):
             finally:
                 supervisor.stop()
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_recover_rejects_provenance_with_invalid_reason(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1678,6 +1698,7 @@ class ProvenanceValidationContractTests(unittest.TestCase):
             finally:
                 supervisor.stop()
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_recover_rejects_provenance_with_malformed_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1729,6 +1750,7 @@ class RouteAuthenticatedDecisionContractTests(unittest.TestCase):
     """A transient identity-reader failure with a matching live control channel
     must NOT orphan on any route; mismatch/dead/wrong-token stay fail-closed."""
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_assign_transient_reader_with_live_control_proceeds_and_audits(self) -> None:
         from loopweave.assignment import assign_task
 
@@ -1760,6 +1782,7 @@ class RouteAuthenticatedDecisionContractTests(unittest.TestCase):
             finally:
                 supervisor.stop()
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_deliver_review_transient_reader_with_live_control_proceeds_and_audits(
         self,
     ) -> None:
@@ -1807,6 +1830,7 @@ class RouteAuthenticatedDecisionContractTests(unittest.TestCase):
             finally:
                 supervisor.stop()
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_takeover_transient_reader_with_live_control_proceeds_past_identity(
         self,
     ) -> None:
@@ -1840,6 +1864,7 @@ class RouteAuthenticatedDecisionContractTests(unittest.TestCase):
             finally:
                 supervisor.stop()
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_bridge_transient_reader_with_live_control_skips_orphan_and_audits(
         self,
     ) -> None:
@@ -1904,6 +1929,7 @@ class RouteAuthenticatedDecisionContractTests(unittest.TestCase):
                 len(orphan_events), 1, "one transition must produce one orphan event"
             )
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_recovery_clear_failure_retry_appends_a_single_recovered_event(
         self,
     ) -> None:
@@ -1942,6 +1968,7 @@ class RouteAuthenticatedDecisionContractTests(unittest.TestCase):
             finally:
                 supervisor.stop()
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_recovery_backfill_failure_aborts_without_clearing(self) -> None:
         from loopweave.liveness import audit_orphan, recover_orphaned
 
@@ -1977,6 +2004,7 @@ class RouteAuthenticatedDecisionContractTests(unittest.TestCase):
             finally:
                 supervisor.stop()
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_two_orphan_recovery_cycles_produce_distinct_events(self) -> None:
         from loopweave.liveness import audit_orphan, recover_orphaned
 
@@ -2008,6 +2036,7 @@ class RouteAuthenticatedDecisionContractTests(unittest.TestCase):
 
 
 class VerdictDeliveryGuardTests(unittest.TestCase):
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_generic_changes_requested_sends_message_then_submit_key(self) -> None:
         from loopweave.cli import _deliver_review
         import loopweave.terminal_host as terminal_host_module

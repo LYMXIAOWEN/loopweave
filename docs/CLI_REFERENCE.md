@@ -600,5 +600,14 @@ loopweave run <agent> --continue-run <source-run-id> ...
 
 ### Windows 能运行吗？
 
-目前不能托管 Windows 终端。Windows ConPTY 后端尚未实现，LoopWeave 会明确失败，
-不会回退到未经验证的伪支持。
+可以。Windows 10 1809+ / Windows 11 支持原生托管终端：ConPTY 终端宿主
+（`pywinpty`）与 per-run Named Pipe 控制通道，Codex Desktop 可见审查走
+`\\.\pipe\codex-ipc`。安装时需启用 `windows` extra：
+
+```powershell
+python -m pip install -e '.[desktop,windows]'
+```
+
+未安装 `windows` extra 时，启动托管终端会明确失败并提示安装命令，不会回退到
+未经验证的伪支持。PowerShell 可直接使用 `bin\loopweave.ps1` 或安装后的
+`loopweave` 命令。

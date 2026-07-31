@@ -1,4 +1,5 @@
 from __future__ import annotations
+import sys
 
 import sqlite3
 import tempfile
@@ -23,6 +24,29 @@ from loopweave.registry import (
     Registry,
     RegistryError,
 )
+
+
+def _connect(db_path: Path) -> sqlite3.Connection:
+    """sqlite3 connection that closes when its ``with`` block exits.
+
+    The plain ``with _connect(...)`` form commits but leaves the
+    handle open; Windows keeps the database file locked until the handle is
+    closed, so tests that remove ``registry.sqlite`` afterwards need the
+    deterministic close here.
+    """
+
+    class _ClosingConnection(sqlite3.Connection):
+        def __exit__(self, exc_type, exc, tb):
+            try:
+                if exc_type is None:
+                    self.commit()
+                else:
+                    self.rollback()
+            finally:
+                self.close()
+            return False
+
+    return sqlite3.connect(str(db_path), factory=_ClosingConnection)
 
 
 class RegistryTests(unittest.TestCase):
@@ -112,7 +136,7 @@ class RegistryTests(unittest.TestCase):
 
     def test_migrates_legacy_runs_table_idempotently(self) -> None:
         legacy_path = Path(self.temp_dir.name) / "legacy.sqlite"
-        with sqlite3.connect(str(legacy_path)) as connection:
+        with _connect(str(legacy_path)) as connection:
             connection.execute(
                 """
                 CREATE TABLE runs (
@@ -277,7 +301,7 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(self.registry.list_thread_bindings("run-1")[0].generation, 1)
 
     def test_create_run_rolls_back_when_history_insert_fails(self) -> None:
-        with sqlite3.connect(str(self.db_path)) as connection:
+        with _connect(str(self.db_path)) as connection:
             connection.execute(
                 """
                 CREATE TRIGGER reject_thread_binding
@@ -291,7 +315,7 @@ class RegistryTests(unittest.TestCase):
         with self.assertRaises(sqlite3.IntegrityError):
             self.registry.create_run(self._run())
 
-        with sqlite3.connect(str(self.db_path)) as connection:
+        with _connect(str(self.db_path)) as connection:
             run_count = connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
             binding_count = connection.execute(
                 "SELECT COUNT(*) FROM run_thread_bindings"
@@ -336,7 +360,7 @@ class RegistryTests(unittest.TestCase):
 
     def test_attach_rejects_already_detached_current_history(self) -> None:
         self.registry.create_run(self._run())
-        with sqlite3.connect(str(self.db_path)) as connection:
+        with _connect(str(self.db_path)) as connection:
             connection.execute(
                 """
                 UPDATE run_thread_bindings
@@ -452,7 +476,7 @@ class RegistryTests(unittest.TestCase):
     def test_apply_pending_attach_rolls_back_when_history_insert_fails(self) -> None:
         self.registry.create_run(self._run())
         queued = self.registry.queue_thread_attach("run-1", "thread-2")
-        with sqlite3.connect(str(self.db_path)) as connection:
+        with _connect(str(self.db_path)) as connection:
             connection.execute(
                 """
                 CREATE TRIGGER reject_pending_thread_binding
@@ -524,7 +548,7 @@ class RegistryTests(unittest.TestCase):
 
     def test_attach_thread_now_rolls_back_when_history_insert_fails(self) -> None:
         self.registry.create_run(self._run())
-        with sqlite3.connect(str(self.db_path)) as connection:
+        with _connect(str(self.db_path)) as connection:
             connection.execute(
                 """
                 CREATE TRIGGER reject_next_thread_binding
@@ -582,6 +606,7 @@ class RegistryTests(unittest.TestCase):
             )
         )
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX permission bits assumed")
     def test_registry_file_is_private(self) -> None:
         mode = self.db_path.stat().st_mode & 0o777
 

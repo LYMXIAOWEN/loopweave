@@ -289,15 +289,10 @@ class BridgeProtocol:
 
     @contextmanager
     def _lock(self):
-        import fcntl as _fcntl
-        self.lock_path.touch(mode=0o600, exist_ok=True)
-        self.lock_path.chmod(0o600)
-        with self.lock_path.open("r+") as handle:
-            _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                _fcntl.flock(handle.fileno(), _fcntl.LOCK_UN)
+        from .file_lock import exclusive_file_lock
+
+        with exclusive_file_lock(self.lock_path, blocking=True):
+            yield
 
     def _require_current_binding(self, binding: BridgeBinding) -> None:
         _validate_binding(binding)

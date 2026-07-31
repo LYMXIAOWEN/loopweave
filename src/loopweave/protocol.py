@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import io
 import os
 import re
 import tempfile
@@ -63,11 +64,25 @@ def write_json_atomic(path: Path, payload: Dict[str, Any]) -> None:
         prefix="." + path.name + ".", suffix=".tmp", dir=str(path.parent)
     )
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
+        # Binary mode + TextIOWrapper: on Windows a text-mode fd would
+        # translate LF to CRLF (harmless for JSON parsing but changes bytes);
+        # binary mode keeps every platform byte-identical.
+        with os.fdopen(descriptor, "wb") as raw_handle:
+            with io.TextIOWrapper(
+                raw_handle,
+                encoding="utf-8",
+                newline="\n",
+            ) as handle:
+                json.dump(
+                    payload,
+                    handle,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
         os.replace(temporary_path, path)
     finally:
         if os.path.exists(temporary_path):

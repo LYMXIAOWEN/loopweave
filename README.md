@@ -53,8 +53,13 @@ LoopWeave 仍处于 **pre-alpha** 阶段，适合开发者试用和共同完善�
 当前边界：
 
 - 可见审查桥目前只支持 Codex Desktop。
-- 终端宿主仍使用 POSIX PTY 和 Unix Socket；真实终端验收目前在 macOS 完成。
-- **Windows ConPTY 尚未实现。** Windows 会明确拒绝启动托管终端，不会假装支持。
+- POSIX 终端宿主使用 PTY 和 Unix Socket；Windows 终端宿主使用 ConPTY
+  （`pywinpty`/`winpty`）和 per-run Named Pipe 控制通道。两套后端共享同一个
+  控制协议、状态机和审查流程。
+- Windows 支持需要在安装时启用 `windows` extra（见下方快速开始）；未安装时
+  仍会明确失败并给出可操作的安装提示，不会假装支持。
+- 真实终端验收：POSIX 在 macOS 完成；Windows ConPTY 通过原生 Windows 单元测试
+  与验收矩阵验证。
 - Codex CLI 的沙箱可能在执行 `loopweave submit` 时要求一次本地命令授权；这与
   审查意见是否自动发送是两个不同的边界。
 
@@ -69,7 +74,7 @@ LoopWeave 仍处于 **pre-alpha** 阶段，适合开发者试用和共同完善�
 
 当前推荐环境：
 
-- macOS；
+- macOS 或 Windows 10 1809+ / Windows 11；
 - Python 3.10 或更高版本；
 - 已安装并登录 Codex Desktop；
 - 已安装 Codex CLI；
@@ -84,6 +89,15 @@ python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install -e '.[desktop]'
 ```
+
+Windows 需要额外安装 ConPTY 后端：
+
+```powershell
+python -m pip install -e '.[desktop,windows]'
+```
+
+PowerShell 下也可以用仓库内的 `bin\loopweave.ps1` 启动（等价于 POSIX 的
+`bin/loopweave`）。
 
 ### 2. 安装并绑定 Codex Desktop 可见审查桥
 

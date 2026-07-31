@@ -1,4 +1,5 @@
 from __future__ import annotations
+import sys
 
 import os
 from pathlib import Path
@@ -114,6 +115,7 @@ class FakeDesktopIpc:
         return {"turnId": "turn-visible"}
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits assumed")
 def test_bind_writes_owner_only_secret_and_synchronizes_run_generation(tmp_path: Path):
     registry = _registry(tmp_path)
     controller = BridgeController(

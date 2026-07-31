@@ -227,8 +227,10 @@ class CodexDispatcher:
         lease_id = uuid.uuid4().hex
         for attempt in range(2):
             try:
+                flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+                flags |= getattr(os, "O_BINARY", 0)
                 descriptor = os.open(
-                    str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
+                    str(lock_path), flags, 0o600
                 )
                 break
             except FileExistsError as error:

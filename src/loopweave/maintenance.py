@@ -53,7 +53,11 @@ def _loopweave_command() -> list[str]:
 
 
 def _domain() -> str:
-    return "gui/{}".format(os.getuid())
+    if hasattr(os, "getuid"):
+        return "gui/{}".format(os.getuid())
+    # Windows has no POSIX uid; launchd domains are macOS-only anyway, so
+    # the value is informational here.
+    return "gui/{}".format(os.environ.get("USERNAME", "loopweave"))
 
 
 def render_launch_agent(

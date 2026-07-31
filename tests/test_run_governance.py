@@ -171,7 +171,9 @@ class RunGovernanceTests(unittest.TestCase):
             reader=lambda _pid: (_ for _ in ()).throw(RuntimeError("blocked"))
         )
 
-        with mock.patch("os.kill", return_value=None):
+        with mock.patch(
+            "loopweave.terminal_host.pid_alive", return_value=True
+        ):
             decision = manager.list_decisions()[0]
 
         self.assertEqual(decision.run_id, run.run_id)

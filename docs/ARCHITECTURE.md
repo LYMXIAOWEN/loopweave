@@ -12,7 +12,10 @@ not inject input into a terminal chosen only by process-name heuristics.
 Host task binding
     -> TerminalHost (platform-neutral boundary)
         -> POSIX PTY backend (macOS and Linux, today)
-        -> Windows ConPTY backend (not yet implemented)
+        -> Windows ConPTY backend (winpty/pywinpty, Windows 10 1809+)
+    -> ControlTransport (platform-neutral control channel)
+        -> POSIX Unix domain socket
+        -> Windows named pipe (`\\.\pipe\loopweave-control-{run_id}-...`)
     -> WorkerProtocol
         -> assign
         -> submit stage / final / needs-human
@@ -33,18 +36,25 @@ they must never become a core allowlist.
 - `TerminalHost` declares the lifecycle the entry point actually drives:
   `start`, `send_input`, `run_foreground`, `resize`, `stop`, `process_identity`.
   `run_foreground` is part of the interface because `loopweave run` calls it.
-- `create_terminal_host(...)` selects the backend at call time. Its `win32`
-  branch raises `UnsupportedPlatformError` before any POSIX import runs.
+- `create_terminal_host(...)` selects the backend at call time:
+  `darwin`/`linux` return the POSIX `Supervisor`; `win32` returns
+  `WindowsConPtyHost` (which raises `UnsupportedPlatformError` with an
+  actionable install hint when the optional `windows` extra is missing).
 - Out-of-process concerns that key on a stored `(pid, start_fingerprint)` pair
   rather than a live host object go through two lazily-resolved providers,
   `default_control_sender()` and `default_process_identity_reader()`, which
-  also fail closed on Windows. Every caller resolves them at call/construction
-  time through the `terminal_host` module object, never a bare-name import.
+  resolve to the platform transport (Unix socket sender and `ps` lookup on
+  POSIX; named-pipe sender and Win32 `GetProcessTimes` fingerprint on
+  Windows). Every caller resolves them at call/construction time through the
+  `terminal_host` module object, never a bare-name import.
 
 `supervisor.Supervisor` is the POSIX backend in place: it formally implements
-`TerminalHost` and gained additive `resize()`/`process_identity()` methods. A
-future Windows package adds one backend alongside its own providers, not a
-rewrite of the six modules that consult them today.
+`TerminalHost` and gained additive `resize()`/`process_identity()` methods.
+`windows_terminal_host.WindowsConPtyHost` implements the same contract on
+Windows with a ConPTY pseudo console; the control channel is a per-run named
+pipe served by the same newline-delimited JSON protocol. Cross-platform file
+locks (`file_lock.py`) and control endpoints (`control_transport.py`) keep the
+POSIX behavior unchanged while Windows runs the same state machines.
 
 ## Vendor-neutral worker submission
 
@@ -124,7 +134,9 @@ The repository contains:
 
 Remaining architecture debt for later packages:
 
-- a Windows ConPTY backend (today Windows fails closed, it is not supported);
+- a Windows ConPTY backend (Windows 10 1809+ / Windows 11, optional
+  `loopweave[windows]` extra; without the extra the platform fails closed with
+  an actionable install hint);
 - Codex Desktop implementation details inside the review host layer;
 - runtime-state placement coupled to a source checkout by default.
 

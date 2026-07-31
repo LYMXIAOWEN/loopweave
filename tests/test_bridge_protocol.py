@@ -1,4 +1,5 @@
 from __future__ import annotations
+import sys
 
 import json
 import os
@@ -126,6 +127,7 @@ def _append_task_event(path: Path, event_type: str, turn_id: str = "turn-1") -> 
         )
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits assumed")
 def test_binding_is_owner_only_and_stale_generation_fails_closed(tmp_path: Path):
     run = _run(tmp_path)
     protocol, _ = _protocol(tmp_path, [run])

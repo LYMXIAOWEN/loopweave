@@ -586,7 +586,7 @@ def doctor_checks(
         except RuntimeError:
             codex = ""
     checks = commands or {
-        "python3": shutil.which("python3") or "",
+        "python3": shutil.which("python3") or sys.executable,
         "codex": codex,
         "claude": shutil.which("claude") or "",
     }
@@ -1122,7 +1122,12 @@ def _run_agent(args: argparse.Namespace) -> int:
     run_dir = RUNS_DIR / run_id
     run_dir.mkdir(parents=True, mode=0o700)
     os.chmod(run_dir, 0o700)
-    socket_path = VAR_DIR / "{}.sock".format(run_id)
+    if sys.platform == "win32":
+        from .control_transport import default_endpoint_for_run
+
+        socket_path = Path(default_endpoint_for_run(run_id))
+    else:
+        socket_path = VAR_DIR / "{}.sock".format(run_id)
     control_token = secrets.token_urlsafe(32)
     baseline_path = run_dir / "workspace-baseline.json"
     write_json_atomic(
@@ -1173,7 +1178,14 @@ def _run_agent(args: argparse.Namespace) -> int:
     pid = supervisor.start()
     record_created = False
     try:
-        tty_path = os.ttyname(sys.stdin.fileno()) if sys.stdin.isatty() else ""
+        if sys.stdin.isatty():
+            tty_path = (
+                ""
+                if sys.platform == "win32"
+                else os.ttyname(sys.stdin.fileno())
+            )
+        else:
+            tty_path = ""
         record = RunRecord(
             run_id=run_id,
             codex_thread_id=thread.thread_id,

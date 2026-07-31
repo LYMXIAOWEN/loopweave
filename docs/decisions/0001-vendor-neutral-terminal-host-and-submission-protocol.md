@@ -111,10 +111,14 @@ class UnsupportedPlatformError(RuntimeError):
 
 def create_terminal_host(*args, **kwargs) -> "TerminalHost":
     if sys.platform == "win32":
-        raise UnsupportedPlatformError(
-            "native Windows terminal hosting (ConPTY) is not implemented "
-            "in this package; LoopWeave currently requires macOS or Linux"
-        )
+        try:
+            from .windows_terminal_host import WindowsConPtyHost
+        except ImportError:
+            raise UnsupportedPlatformError(
+                "native Windows terminal hosting requires the 'windows' "
+                "extra; install with: pip install 'loopweave[windows]'"
+            )
+        return WindowsConPtyHost(*args, **kwargs)
     from .supervisor import Supervisor
     return Supervisor(*args, **kwargs)
 ```
@@ -122,10 +126,11 @@ def create_terminal_host(*args, **kwargs) -> "TerminalHost":
 `cli._run_agent` calls `create_terminal_host(...)` instead of
 constructing `Supervisor(...)` directly — same keyword arguments, same
 call site, only the callee changes. This is required, not optional: an
-unused factory is not a boundary the product actually has. A
-`WindowsConPtyHost` class is **out of scope for this package** — the
-`win32` branch is the only Windows-aware code Package 1 adds, and it
-fails closed rather than attempting an untested implementation.
+unused factory is not a boundary the product actually has. The Windows
+backend (`windows_terminal_host.WindowsConPtyHost`) implements the same
+contract with a ConPTY pseudo console (winpty/pywinpty) and a per-run
+named-pipe control channel; when the optional `windows` extra is not
+installed the factory fails closed with an actionable install hint.
 
 `bridge_protocol.py`'s unconditional `import fcntl` (used for the
 advisory `flock` lock in `BridgeProtocol._lock`) is guarded the same way,
@@ -147,10 +152,8 @@ class ControlSender(Protocol):
 
 def default_control_sender() -> "ControlSender":
     if sys.platform == "win32":
-        raise UnsupportedPlatformError(
-            "control-message delivery to a managed session is not "
-            "implemented on Windows in this package"
-        )
+        from .control_transport import send_control_message
+        return send_control_message
     from .supervisor import send_control_message
     return send_control_message
 ```
@@ -217,10 +220,8 @@ class ProcessIdentityReader(Protocol):
 
 def default_process_identity_reader() -> "ProcessIdentityReader":
     if sys.platform == "win32":
-        raise UnsupportedPlatformError(
-            "process-identity lookup for a managed session is not "
-            "implemented on Windows in this package"
-        )
+        from .windows_terminal_host import process_start_time
+        return process_start_time
     from .supervisor import process_start_time
     return process_start_time
 ```
@@ -250,13 +251,13 @@ exempted from it.
 
 On POSIX this is mechanical and non-behavioral:
 `default_process_identity_reader()` returns exactly today's
-`process_start_time`. On a simulated `win32` platform, every one of the
-ten call sites above raises `UnsupportedPlatformError` at the point a
-liveness check is actually attempted, not merely at import — `cli.py`,
-`assignment.py`, `bridge_control.py`, `completion_notifier.py`,
-`dispatcher.py`, and `thread_takeover.py` all continue to import cleanly
-under a blocked-`pty` platform, the same import-safety property section
-2 established for control delivery.
+`process_start_time`. On `win32` it returns the Windows implementation
+(Win32 `GetProcessTimes` creation-time fingerprint, never `ps`); the
+ten call sites above stay unchanged because they already go through
+`terminal_host.default_process_identity_reader()`. The Windows process
+probe must never use `os.kill(pid, 0)`: signal 0 is `CTRL_C_EVENT` on
+Windows and would broadcast Ctrl+C to the console, so `pid_alive()` uses
+`OpenProcess` instead.
 
 ### 3. Vendor-neutral worker submission service
 
@@ -446,7 +447,7 @@ The public surface uses LoopWeave identifiers exclusively:
 | Requirement | Proof mechanism |
 |---|---|
 | `TerminalHost` covers the real foreground lifecycle | `isinstance(host, TerminalHost)`; `run_foreground()` exit-code parity on the non-TTY branch; `resize()`/`process_identity()` checked against observable PTY-resize events and the live PID/fingerprint, not `hasattr` |
-| `_run_agent` cannot bypass the platform boundary | Test patches `cli.create_terminal_host` and asserts it is called; a `win32`-simulated invocation asserts `UnsupportedPlatformError` before `Supervisor` is ever constructed |
+| `_run_agent` cannot bypass the platform boundary | Test patches `cli.create_terminal_host` and asserts it is called; a `win32`-simulated invocation (with the `windows` extra present) drives `WindowsConPtyHost` and a named-pipe control endpoint and proves `Supervisor` is never constructed; without the extra it asserts the actionable `UnsupportedPlatformError` |
 | Control delivery has no direct POSIX dependency | `assignment.py`/`completion_notifier.py` import cleanly under a blocked-`pty` platform; `assign_task`/`CompletionNotifier` resolve the default sender only at call/construction time, not import time; `cli._stop_run`/`_deliver_review`/`_finalize_owner_review` each independently proven to consult `default_control_sender()` |
 | Process-identity lookup has no direct POSIX dependency | `cli.py`/`assignment.py`/`bridge_control.py`/`completion_notifier.py`/`dispatcher.py`/`thread_takeover.py` import cleanly under a blocked-`pty` platform — a necessary but not sufficient check by itself, since a module could still bind `process_start_time` directly and import cleanly once `supervisor.py`'s own imports are guarded. Each of the ten call sites named in section 2a is *additionally* proven, with a runtime fixture (not an import probe), to actually invoke `default_process_identity_reader()` when called: `cli._stop_run`/`_deliver_review`/`_finalize_owner_review`/`_run_agent`/`_reconcile_run_liveness`, `assignment.assign_task`, `completion_notifier.CompletionNotifier`, `dispatcher.inspect_dispatch_lease`, `thread_takeover.ThreadTakeoverCoordinator.attach`, and `bridge_control.BridgeController.reconcile_stale_pending_reviews` each have a dedicated runtime-consultation test — import-cleanliness alone is never treated as proof of migration |
 | Evidence bounds are real on both the validator and every public entry point | `validate_bounded_text`/`validate_evidence` tested in isolation for every rejection and boundary case, including UTF-8 multibyte inputs where character count and byte count diverge; `submit_stage`, `submit_final`, and `submit_needs_human` are *each* independently exercised with a multibyte-boundary value (character count under the limit, UTF-8 byte count over it), not only ASCII, so a public function that counts characters instead of bytes cannot pass by coincidence |
@@ -461,14 +462,12 @@ The public surface uses LoopWeave identifiers exclusively:
 
 - A Windows checkout can `import loopweave.cli`, `assignment`,
   `bridge_control`, `completion_notifier`, `dispatcher`, and
-  `thread_takeover` without touching `pty`/`termios`/`fcntl`. Actually
-  running a managed session, sending a control message, or checking
-  whether a managed process is still alive, on that checkout raises
-  `UnsupportedPlatformError` before any POSIX syscall — an honest,
-  tested failure mode, not a claim of support. A future Windows package
-  adds one `WindowsProcessIdentityReader` alongside its
-  `WindowsConPtyHost`, not a rewrite of six modules' liveness-check call
-  sites.
+  `thread_takeover` without touching `pty`/`termios`/`fcntl`. With the
+  optional `windows` extra installed it can run a managed ConPTY session,
+  deliver control messages over a named pipe, and check process liveness
+  with Win32 APIs; without the extra it fails closed with an actionable
+  `UnsupportedPlatformError` before any POSIX syscall — never a silent
+  fallback to an untested implementation.
 - `codex`, `opencode`, `kimi`, and any other executable name become
   valid `loopweave run <name>` invocations without per-agent adapter code.
 - A non-Claude, non-interactive worker can complete a full
@@ -494,9 +493,11 @@ The public surface uses LoopWeave identifiers exclusively:
 - **Branch on `sys.platform` inline inside `Supervisor` instead of a
   factory.** Interleaves POSIX and future Windows code in one file and
   removes the single seam a factory gives for swapping backends.
-- **Ship a Windows backend now using `pywinpty` or similar.** Explicitly
-  prohibited by the package brief; deferred to a future package with
-  real Windows CI.
+- **Ship a Windows backend now using `pywinpty` or similar.** Originally
+  deferred to a future package with real Windows CI; adopted in this
+  change as an optional extra (`loopweave[windows]`) with a native
+  Windows test suite and acceptance matrix. The default install keeps
+  zero Windows-only dependencies.
 - **Keep `get_adapter` rejecting unknown names, require `run --
   <command>` for everything.** The package brief's acceptance criteria
   require `loopweave run codex` (no `--`) to work; the `--` spelling

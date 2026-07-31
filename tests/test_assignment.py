@@ -38,7 +38,11 @@ class AssignmentValidationTests(unittest.TestCase):
     def test_validate_task_file_returns_content_size_and_digest(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "task.md"
-            path.write_text("# Task\n\nDo the work.\n", encoding="utf-8")
+            path.write_text(
+                "# Task\n\nDo the work.\n",
+                encoding="utf-8",
+                newline="\n",
+            )
 
             task = validate_task_file(path)
 

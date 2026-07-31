@@ -102,6 +102,7 @@ class EndToEndTests(unittest.TestCase):
                 ).exists()
             )
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_reviewer_verdict_returns_to_original_worker_process(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -165,6 +166,7 @@ class EndToEndTests(unittest.TestCase):
                 registry.get_run("run-1").state, RunState.WORKER_CONTINUING
             )
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_visible_review_submit_reaches_original_worker_process(self) -> None:
         registry, supervisor, run_dir = self._managed_review_fixture()
         root = run_dir.parent
@@ -229,6 +231,7 @@ class EndToEndTests(unittest.TestCase):
             RunState.WORKER_CONTINUING,
         )
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_visible_stage_approval_returns_original_worker_to_continuing(
         self,
     ) -> None:
@@ -290,6 +293,7 @@ class EndToEndTests(unittest.TestCase):
         )
         self.assertFalse((run_dir / "owner-completion-review-id").exists())
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_visible_final_approval_auto_finalizes_and_notifies_worker(
         self,
     ) -> None:
@@ -392,6 +396,7 @@ class EndToEndTests(unittest.TestCase):
             "approved",
         )
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_review_is_not_delivered_after_process_identity_changes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -449,6 +454,7 @@ class EndToEndTests(unittest.TestCase):
 
             self.assertEqual(registry.get_run("run-1").state, RunState.ORPHANED)
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_review_run_id_must_match(self) -> None:
         registry, supervisor, run_dir = self._managed_review_fixture(
             review_run_id="run-other"
@@ -459,6 +465,7 @@ class EndToEndTests(unittest.TestCase):
         finally:
             supervisor.stop()
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_review_file_cannot_escape_run_directory(self) -> None:
         registry, supervisor, run_dir = self._managed_review_fixture(
             review_file="../outside.md"
@@ -470,6 +477,7 @@ class EndToEndTests(unittest.TestCase):
         finally:
             supervisor.stop()
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_same_review_is_delivered_only_once(self) -> None:
         registry, supervisor, run_dir = self._managed_review_fixture()
         try:
@@ -481,6 +489,7 @@ class EndToEndTests(unittest.TestCase):
 
         self.assertEqual(output.count("Review body."), 1)
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_review_delivery_pauses_before_submitting_multiline_input(self) -> None:
         registry, supervisor, run_dir = self._managed_review_fixture()
         try:
@@ -491,6 +500,7 @@ class EndToEndTests(unittest.TestCase):
 
         sleep.assert_called_once_with(0.35)
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_pending_takeover_applies_after_exactly_once_delivery(self) -> None:
         registry, supervisor, run_dir = self._managed_review_fixture()
         registry.queue_thread_attach("run-1", "thread-2")
@@ -513,6 +523,7 @@ class EndToEndTests(unittest.TestCase):
             ["thread-1", "thread-2"],
         )
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_final_approved_review_waits_for_owner_global_decision(self) -> None:
         registry, supervisor, run_dir = self._managed_review_fixture(
             verdict="approved",
@@ -542,6 +553,7 @@ class EndToEndTests(unittest.TestCase):
         self.assertTrue(metadata["owner_review_pending"])
         self.assertFalse(metadata["owner_notified"])
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_owner_approval_finalizes_pending_review_and_notifies_worker(self) -> None:
         registry, supervisor, run_dir = self._managed_review_fixture(
             verdict="approved",
@@ -575,6 +587,7 @@ class EndToEndTests(unittest.TestCase):
         )
         self.assertEqual(verdict["verdict"], "approved")
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_owner_changes_requested_returns_run_to_worker_continuing(self) -> None:
         registry, supervisor, run_dir = self._managed_review_fixture(
             verdict="approved",
@@ -607,6 +620,7 @@ class EndToEndTests(unittest.TestCase):
         )
         self.assertEqual(verdict["verdict"], "changes_requested")
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_owner_changes_requested_delivery_failure_remains_pending(self) -> None:
         registry, supervisor, run_dir = self._managed_review_fixture(
             verdict="approved",
@@ -639,6 +653,7 @@ class EndToEndTests(unittest.TestCase):
         self.assertFalse((run_dir / "owner-final-verdict.json").exists())
         self.assertTrue((run_dir / "owner-final-delivery-error.txt").exists())
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_stage_approved_review_returns_worker_to_continuing_without_owner_completion(
         self,
     ) -> None:
@@ -698,6 +713,7 @@ class EndToEndTests(unittest.TestCase):
         )
         self.assertTrue(review["continue"])
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_legacy_approved_continue_without_scope_is_final(self) -> None:
         registry, supervisor, run_dir = self._managed_review_fixture(
             verdict="approved",
@@ -733,6 +749,7 @@ class EndToEndTests(unittest.TestCase):
         )
         self.assertFalse(review["continue"])
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_stage_scope_canonicalizes_approved_review_to_continue(self) -> None:
         registry, supervisor, run_dir = self._managed_review_fixture()
         (run_dir / "review-request.json").write_text(
@@ -808,6 +825,7 @@ class EndToEndTests(unittest.TestCase):
             RunState.WORKER_CONTINUING,
         )
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_approved_review_retries_missing_completion_channel(self) -> None:
         registry, supervisor, run_dir = self._managed_review_fixture(
             verdict="approved"
@@ -1025,6 +1043,7 @@ class EndToEndTests(unittest.TestCase):
             time.sleep(0.02)
         self.fail("Timed out waiting for {!r}".format(text))
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX pty required")
     def test_generic_worker_completes_stage_review_and_final_in_same_session(
         self,
     ) -> None:

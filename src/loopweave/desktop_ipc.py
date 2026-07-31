@@ -6,6 +6,7 @@ import re
 import socket
 import stat
 import struct
+import sys
 import tempfile
 import uuid
 from pathlib import Path
@@ -35,6 +36,8 @@ def desktop_ipc_socket_candidates() -> tuple[Path, ...]:
     explicit = os.environ.get(DESKTOP_IPC_SOCKET_ENV, "").strip()
     if explicit:
         return (Path(explicit).expanduser(),)
+    if sys.platform == "win32":
+        return (Path(r"\\.\pipe\codex-ipc"),)
 
     configured_home = os.environ.get("CODEX_HOME", "").strip()
     codex_home = (
@@ -60,6 +63,8 @@ def _is_owned_socket(path: Path) -> bool:
 
 
 def desktop_ipc_socket_path() -> Path:
+    if sys.platform == "win32":
+        return desktop_ipc_socket_candidates()[0]
     candidates = desktop_ipc_socket_candidates()
     for candidate in candidates:
         if _is_owned_socket(candidate):
@@ -81,13 +86,13 @@ def encode_frame(payload: dict[str, Any]) -> bytes:
     return struct.pack("<I", len(body)) + body
 
 
-def _read_exact(connection: socket.socket, size: int) -> bytes:
+def _read_exact(connection: Any, size: int) -> bytes:
     chunks: list[bytes] = []
     remaining = size
     while remaining:
         try:
             chunk = connection.recv(remaining)
-        except (OSError, socket.timeout) as error:
+        except Exception as error:
             raise DesktopIpcError("Desktop IPC read failed") from error
         if not chunk:
             raise DesktopIpcError("Desktop IPC connection closed")
@@ -96,7 +101,7 @@ def _read_exact(connection: socket.socket, size: int) -> bytes:
     return b"".join(chunks)
 
 
-def read_frame(connection: socket.socket) -> Any:
+def read_frame(connection: Any) -> Any:
     header = _read_exact(connection, 4)
     length = struct.unpack("<I", header)[0]
     if length == 0 or length > MAX_FRAME_BYTES:
@@ -162,12 +167,25 @@ class DesktopIpcClient:
         connection.close()
         return {"healthy": True, "client_id": client_id}
 
-    def _connect_initialized(self) -> tuple[socket.socket, str]:
+    def _connect_initialized(self) -> tuple[Any, str]:
         self._validate_socket()
-        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        try:
+        if sys.platform == "win32":
+            from .win32_pipe import pipe_connect
+
+            try:
+                handle = pipe_connect(
+                    str(self.socket_path), timeout=self.timeout_seconds
+                )
+            except Exception as error:
+                raise DesktopIpcError(
+                    "Desktop IPC connection failed"
+                ) from error
+            connection = _PipeStream(handle, timeout=self.timeout_seconds)
+        else:
+            connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             connection.settimeout(self.timeout_seconds)
             connection.connect(str(self.socket_path))
+        try:
             initialized = self._request(
                 connection,
                 method="initialize",
@@ -189,6 +207,14 @@ class DesktopIpcClient:
             raise DesktopIpcError("Desktop IPC connection failed") from error
 
     def _validate_socket(self) -> None:
+        if sys.platform == "win32":
+            from .win32_pipe import is_pipe_name
+
+            if not is_pipe_name(str(self.socket_path)):
+                raise DesktopIpcError(
+                    "Codex Desktop IPC path is not a named pipe"
+                )
+            return
         try:
             details = self.socket_path.lstat()
         except OSError as error:
@@ -200,7 +226,7 @@ class DesktopIpcClient:
 
     def _request(
         self,
-        connection: socket.socket,
+        connection: Any,
         *,
         method: str,
         version: int,
@@ -248,7 +274,7 @@ class DesktopIpcClient:
 
     @staticmethod
     def _reject_discovery(
-        connection: socket.socket,
+        connection: Any,
         request: dict[str, Any],
     ) -> None:
         request_id = request.get("requestId")
@@ -263,3 +289,37 @@ class DesktopIpcClient:
                 }
             )
         )
+
+
+class _PipeStream:
+    """Byte-stream adapter over a Win32 named-pipe handle."""
+
+    def __init__(
+        self,
+        handle: int,
+        *,
+        timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    ) -> None:
+        self._handle = handle
+        self._timeout_ms = int(max(1.0, timeout) * 1000)
+
+    def sendall(self, data: bytes) -> None:
+        from .win32_pipe import NamedPipeError, pipe_write_all
+
+        try:
+            pipe_write_all(self._handle, data)
+        except NamedPipeError as error:
+            raise DesktopIpcError("Desktop IPC write failed") from error
+
+    def recv(self, size: int) -> bytes:
+        from .win32_pipe import NamedPipeError, pipe_read
+
+        try:
+            return pipe_read(self._handle, size, timeout_ms=self._timeout_ms)
+        except NamedPipeError as error:
+            raise DesktopIpcError("Desktop IPC read failed") from error
+
+    def close(self) -> None:
+        from .win32_pipe import pipe_close
+
+        pipe_close(self._handle)

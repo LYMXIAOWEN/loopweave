@@ -14,8 +14,9 @@ references the exact packet.
 from __future__ import annotations
 
 import os
-import select
+import queue
 import sys
+import threading
 import time
 
 
@@ -29,16 +30,26 @@ def main() -> int:
 
     # Wait for the assignment on the managed terminal input. LoopWeave delivers
     # it only after the run record and exact task packet are installed, so its
-    # arrival is the readiness gate (no private-state polling).
+    # arrival is the readiness gate (no private-state polling).  A reader
+    # thread + queue is used instead of select() because Windows select()
+    # only supports sockets, not console/stdin handles.
+    lines: "queue.Queue[str]" = queue.Queue()
+    reader_done = threading.Event()
+
+    def _read_stdin() -> None:
+        for line in sys.stdin:
+            lines.put(line)
+        reader_done.set()
+
+    reader = threading.Thread(target=_read_stdin, daemon=True)
+    reader.start()
     deadline = time.time() + 8
     saw_assignment = False
-    while time.time() < deadline:
-        ready, _, _ = select.select([sys.stdin], [], [], 0.2)
-        if not ready:
+    while time.time() < deadline and not reader_done.is_set():
+        try:
+            line = lines.get(timeout=0.2)
+        except queue.Empty:
             continue
-        line = sys.stdin.readline()
-        if not line:
-            break
         if "[LoopWeave assignment]" in line:
             saw_assignment = True
             # Hold this live session briefly so the launcher finishes the full

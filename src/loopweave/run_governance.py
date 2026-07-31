@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import errno
 import hashlib
 import io
 import json
 import os
 import stat
+import sys
 import tarfile
 import uuid
 from contextlib import contextmanager
@@ -284,26 +284,16 @@ class RunGovernance:
 
     @contextmanager
     def maintenance_lock(self) -> Iterator[None]:
+        from .file_lock import exclusive_file_lock
+
         lock_path = self.paths.maintenance / "governance.lock"
-        descriptor = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
         try:
-            try:
-                import fcntl
-
-                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except (ImportError, BlockingIOError) as error:
-                raise GovernanceError(
-                    "another LoopWeave maintenance operation is active"
-                ) from error
-            yield
-        finally:
-            try:
-                import fcntl
-
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
-            except (ImportError, OSError):
-                pass
-            os.close(descriptor)
+            with exclusive_file_lock(lock_path, blocking=False):
+                yield
+        except BlockingIOError as error:
+            raise GovernanceError(
+                "another LoopWeave maintenance operation is active"
+            ) from error
 
     def _process_status(self, run: RunRecord) -> str:
         if run.agent_pid <= 0:
@@ -311,16 +301,10 @@ class RunGovernance:
         try:
             observed = self.process_start_reader(run.agent_pid)
         except Exception:
-            try:
-                os.kill(run.agent_pid, 0)
-            except ProcessLookupError:
+            from .terminal_host import pid_alive
+
+            if not pid_alive(run.agent_pid):
                 return "dead"
-            except PermissionError:
-                return "uncertain"
-            except OSError as error:
-                if error.errno == errno.ESRCH:
-                    return "dead"
-                return "uncertain"
             return "uncertain"
         if observed == run.agent_process_start:
             return "live"
@@ -968,6 +952,10 @@ class RunGovernance:
             )
 
     def _remove_stale_socket(self, run: RunRecord) -> None:
+        if sys.platform == "win32":
+            # Windows control endpoints are named pipes, not socket files;
+            # there is no filesystem artifact to remove.
+            return
         socket_path = Path(run.socket_path)
         if not socket_path.exists():
             return

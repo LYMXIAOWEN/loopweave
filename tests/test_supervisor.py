@@ -11,6 +11,7 @@ from loopweave.supervisor import Supervisor, send_control_message
 from loopweave.runtime_config import RunPolicy
 
 
+@unittest.skipIf(sys.platform == "win32", "POSIX pty required")
 class SupervisorTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()

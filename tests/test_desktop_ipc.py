@@ -1,4 +1,5 @@
 from __future__ import annotations
+import sys
 
 import socket
 import struct
@@ -119,6 +120,7 @@ def _bind_socket(path: Path) -> socket.socket:
     return server
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX AF_UNIX socket required")
 def test_socket_discovery_prefers_current_codex_home_socket(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -143,6 +145,7 @@ def test_socket_discovery_prefers_current_codex_home_socket(
             legacy_server.close()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX AF_UNIX socket required")
 def test_socket_discovery_falls_back_to_legacy_socket(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -198,6 +201,7 @@ def test_frame_reader_rejects_invalid_length(length: int) -> None:
         right.close()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX AF_UNIX socket required")
 def test_start_visible_turn_uses_owner_routed_desktop_request(
     short_socket_path: Path,
 ) -> None:
@@ -240,6 +244,7 @@ def test_start_visible_turn_uses_owner_routed_desktop_request(
     }
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX AF_UNIX socket required")
 def test_probe_performs_initialize_only_read_only_handshake(
     short_socket_path: Path,
 ) -> None:
@@ -253,6 +258,7 @@ def test_probe_performs_initialize_only_read_only_handshake(
     assert [message["method"] for message in router.messages] == ["initialize"]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX AF_UNIX socket required")
 def test_start_visible_turn_fails_closed_when_no_owner_can_handle(
     short_socket_path: Path,
 ) -> None:
