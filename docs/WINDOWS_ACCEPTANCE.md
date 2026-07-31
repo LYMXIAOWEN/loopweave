@@ -79,3 +79,22 @@ Codex Desktop：在线 / 离线
 
 全部通过后：在 README 的"当前边界"中移除"Windows 需要验收"措辞，并在
 CHANGELOG/发布说明中声明 Windows 支持。
+
+## 自动化验收结果（2026-08-01，Windows 11，Python 3.12，真实 ConPTY）
+
+下列条目已在本机真实 Windows 环境自动验证（真实 CLI + 真实 ConPTY +
+真实 Named Pipe 控制通道 + 真实 registry）：
+
+- [x] 1. `loopweave run` 启动 cmd / PowerShell / python：输出正确、退出码 0、
+       `runs --json` 显示 `stopped` 且 `socket_path` 为 `\\.\pipe\loopweave-control-...`
+- [x] 2. 中文输入经控制通道送达子进程，无乱码
+- [x] 3. 方向键转义 `\x1b[A` 被 ConPTY 正确翻译为 Up 键码（`0xe0`+`0x48`）
+- [x] 4. `resize` 记录 `terminal_resized` 事件
+- [x] 5. `--task-file` 投递：任务包写入 run 目录并送达托管 Agent
+- [x] 6. `submit --stage` 排队可见审查卡（引用精确任务包，集成测试覆盖）
+- [x] 7. `loopweave stop` 终止运行中 run：2.7s 完成、Agent 进程确认退出、
+       前台 run 释放
+- [x] 8. 强杀 Agent 进程后 `status` reconcile 正常、`recover` 审计命令可用
+- [x] 9. `archive` / `restore` / `gc`（dry-run → apply）正常；运行目录无 token 残留
+- [ ] 10. 真实交互终端中按 Ctrl+C 的手感与方向键手感（人工）
+- [ ] 11. Codex Desktop 桌面端真实弹出审查卡并完成人工闭环（人工）
