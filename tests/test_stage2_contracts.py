@@ -426,6 +426,7 @@ class RunAgentUsesFactoryContractTests(unittest.TestCase):
         from loopweave.cli import _run_agent
         from loopweave.models import RunState
         from loopweave.registry import Registry
+        from loopweave.windows_terminal_host import WindowsConPtyHost
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
@@ -465,6 +466,14 @@ class RunAgentUsesFactoryContractTests(unittest.TestCase):
             ), patch(
                 "loopweave.windows_terminal_host._resolve_command",
                 side_effect=lambda command: command[0],
+            ), patch.object(
+                WindowsConPtyHost,
+                "_serve_control",
+                lambda self: None,
+            ), patch.object(
+                WindowsConPtyHost,
+                "_poke_control_server",
+                lambda self: None,
             ), patch(
                 "loopweave.supervisor.Supervisor",
                 side_effect=AssertionError(
