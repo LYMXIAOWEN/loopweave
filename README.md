@@ -56,10 +56,11 @@ LoopWeave 仍处于 **pre-alpha** 阶段，适合开发者试用和共同完善�
 - POSIX 终端宿主使用 PTY 和 Unix Socket；Windows 终端宿主使用 ConPTY
   （`pywinpty`/`winpty`）和 per-run Named Pipe 控制通道。两套后端共享同一个
   控制协议、状态机和审查流程。
-- Windows 支持需要在安装时启用 `windows` extra（见下方快速开始）；未安装时
+- Windows 后端需要在安装时启用 `windows` extra（见下方快速开始）；未安装时
   仍会明确失败并给出可操作的安装提示，不会假装支持。
-- 真实终端验收：POSIX 在 macOS 完成；Windows ConPTY 通过原生 Windows 单元测试
-  与验收矩阵验证。
+- 真实终端验收：POSIX 在 macOS 完成；Windows 原生 ConPTY/Named Pipe 后端已通过
+  自动化验收（真实 ConPTY、控制通道、生命周期），真实交互终端手感与 Codex
+  Desktop 桌面审查闭环仍待人工验收（见 `docs/WINDOWS_ACCEPTANCE.md`）。
 - Codex CLI 的沙箱可能在执行 `loopweave submit` 时要求一次本地命令授权；这与
   审查意见是否自动发送是两个不同的边界。
 
@@ -74,7 +75,7 @@ LoopWeave 仍处于 **pre-alpha** 阶段，适合开发者试用和共同完善�
 
 当前推荐环境：
 
-- macOS 或 Windows 10 1809+ / Windows 11；
+- macOS（推荐）；Windows 10 1809+ / Windows 11（原生后端可用，人工验收进行中）；
 - Python 3.10 或更高版本；
 - 已安装并登录 Codex Desktop；
 - 已安装 Codex CLI；

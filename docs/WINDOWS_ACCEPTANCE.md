@@ -82,19 +82,22 @@ CHANGELOG/发布说明中声明 Windows 支持。
 
 ## 自动化验收结果（2026-08-01，Windows 11，Python 3.12，真实 ConPTY）
 
-下列条目已在本机真实 Windows 环境自动验证（真实 CLI + 真实 ConPTY +
-真实 Named Pipe 控制通道 + 真实 registry）：
+下列结果在本机真实 Windows 环境验证（真实 CLI + 真实 ConPTY + 真实 Named
+Pipe 控制通道 + 真实 registry），按上方人工矩阵的原编号登记：
 
-- [x] 1. `loopweave run` 启动 cmd / PowerShell / python：输出正确、退出码 0、
-       `runs --json` 显示 `stopped` 且 `socket_path` 为 `\\.\pipe\loopweave-control-...`
-- [x] 2. 中文输入经控制通道送达子进程，无乱码
-- [x] 3. 方向键转义 `\x1b[A` 被 ConPTY 正确翻译为 Up 键码（`0xe0`+`0x48`）
-- [x] 4. `resize` 记录 `terminal_resized` 事件
-- [x] 5. `--task-file` 投递：任务包写入 run 目录并送达托管 Agent
-- [x] 6. `submit --stage` 排队可见审查卡（引用精确任务包，集成测试覆盖）
-- [x] 7. `loopweave stop` 终止运行中 run：2.7s 完成、Agent 进程确认退出、
-       前台 run 释放
-- [x] 8. 强杀 Agent 进程后 `status` reconcile 正常、`recover` 审计命令可用
-- [x] 9. `archive` / `restore` / `gc`（dry-run → apply）正常；运行目录无 token 残留
-- [ ] 10. 真实交互终端中按 Ctrl+C 的手感与方向键手感（人工）
-- [ ] 11. Codex Desktop 桌面端真实弹出审查卡并完成人工闭环（人工）
+| 原编号 | 验收项 | 自动化证据 | 人工状态 |
+|---|---|---|---|
+| 1–3 | cmd / PowerShell / Python 启动 | 输出正确、退出码 0、`runs --json` 为 `stopped` 且 `socket_path` 形如 `\\.\pipe\loopweave-control-...` | 待人工复核 |
+| 4 | 普通文本与中文输入 | 经控制通道送达子进程，无乱码 | 待人工复核 |
+| 5 | 方向键 / 功能键 | 真实 ConPTY 测试：`\x1b[A` 在子进程内产生 Up 键事件（前导 `0xe0` + 扫描码 `H`） | 真实手感待人工验证 |
+| 6 | Ctrl+C | 控制通道 stop 先发送 Ctrl+C，忽略中断的子进程由进程树终止兜底 | 真实手感待人工验证 |
+| 7 | 窗口尺寸 | 真实 ConPTY 测试：resize 后子进程控制台实测为 `120x40`；前台循环按轮询同步控制台尺寸 | 真实窗口拖动待人工验证 |
+| 8 | `--task-file` 投递 | 任务包写入 run 目录并送达托管 Agent | 待人工复核 |
+| 9 | `submit --stage` | 阶段提交排队并引用精确任务包（集成测试覆盖） | 待人工复核 |
+| 10–12 | Codex Desktop 可见审查闭环 | 未验证（需要真实 Codex Desktop） | 待人工完成 |
+| 13 | `loopweave stop` | 2.7s 完成、Agent 进程确认退出、前台 run 释放 | 待人工复核 |
+| 14 | 强杀后恢复 | `status` reconcile 正常、`recover` 审计命令可用 | 待人工复核 |
+| 15 | `archive` / `restore` / `gc` | dry-run → apply 正常；运行目录无 token 残留 | 待人工复核 |
+
+说明：自动化证据只为对应验收项提供底层依据，不等同于人工闭环完成。只有上方
+1–15 全部人工通过后，才允许把 README 的 Windows 表述改为正式支持。
