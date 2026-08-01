@@ -299,6 +299,8 @@ class CodexDispatcher:
                 ),
                 text=True,
                 capture_output=True,
+                encoding="utf-8",
+                errors="replace",
                 cwd=str(
                     Path(workspace_root).resolve()
                     if workspace_root

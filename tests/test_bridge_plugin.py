@@ -175,3 +175,31 @@ def test_status_reports_installed_plugin_version(tmp_path: Path):
         "version": "0.1.0+codex.test",
         "plugin_id": "loopweave-visible-bridge@loopweave-local",
     }
+
+
+def test_run_json_decodes_codex_output_as_utf8(tmp_path: Path):
+    """The codex CLI emits UTF-8 JSON (including non-ASCII paths). On a
+    Chinese Windows console the default ANSI decode is GBK and crashes on
+    multibyte output, so the runner must force UTF-8 with replacement."""
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(kwargs)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout='{"marketplaces": [{"name": "loopweave-可见桥"}]}',
+            stderr="",
+        )
+
+    manager = BridgePluginManager(
+        codex_bin=Path("/opt/codex"),
+        marketplace_root=tmp_path,
+        runner=run,
+    )
+
+    payload = manager._run_json(["plugin", "marketplace", "list", "--json"])
+
+    assert payload["marketplaces"][0]["name"] == "loopweave-可见桥"
+    assert calls[0]["encoding"] == "utf-8"
+    assert calls[0]["errors"] == "replace"
