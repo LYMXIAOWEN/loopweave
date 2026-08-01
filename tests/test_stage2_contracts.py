@@ -463,6 +463,9 @@ class RunAgentUsesFactoryContractTests(unittest.TestCase):
                 "loopweave.terminal_host.default_process_identity_reader",
                 return_value=lambda pid: "fake-process-start",
             ), patch(
+                "loopweave.windows_terminal_host._resolve_command",
+                side_effect=lambda command: command[0],
+            ), patch(
                 "loopweave.supervisor.Supervisor",
                 side_effect=AssertionError(
                     "no Supervisor/pty operation may run on win32; "

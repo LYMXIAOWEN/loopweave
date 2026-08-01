@@ -774,7 +774,13 @@ class CliTests(unittest.TestCase):
             binary.write_text("", encoding="utf-8")
             output = io.StringIO()
 
-            with patch("loopweave.cli.resolve_codex_bin", return_value=binary):
+            with patch(
+                "loopweave.cli.resolve_codex_bin", return_value=binary
+            ), patch(
+                "loopweave.cli.shutil.which", return_value=str(binary)
+            ), patch(
+                "loopweave.cli.CODEX_SESSIONS_DIR", binary.parent
+            ):
                 healthy = doctor_checks(output)
 
         self.assertTrue(healthy)
