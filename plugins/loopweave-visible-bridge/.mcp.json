@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "loopweave-visible-bridge": {
-      "command": "python3",
-      "args": ["./server/bridge_server.py"],
+      "command": "loopweave",
+      "args": ["bridge", "serve"],
       "cwd": "."
     }
   }

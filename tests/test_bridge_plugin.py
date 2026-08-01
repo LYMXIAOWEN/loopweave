@@ -203,3 +203,21 @@ def test_run_json_decodes_codex_output_as_utf8(tmp_path: Path):
     assert payload["marketplaces"][0]["name"] == "loopweave-可见桥"
     assert calls[0]["encoding"] == "utf-8"
     assert calls[0]["errors"] == "replace"
+
+
+def test_plugin_mcp_manifest_uses_loopweave_serve():
+    """The plugin MCP command must not depend on a platform-specific
+    interpreter name: ``python3`` does not exist on Windows venvs. The
+    manifest must call the installed ``loopweave`` entry point instead."""
+    root = Path(__file__).resolve().parents[1]
+    manifest = json.loads(
+        (
+            root
+            / "plugins"
+            / "loopweave-visible-bridge"
+            / ".mcp.json"
+        ).read_text(encoding="utf-8")
+    )
+    server = manifest["mcpServers"]["loopweave-visible-bridge"]
+    assert server["command"] == "loopweave"
+    assert server["args"] == ["bridge", "serve"]

@@ -379,6 +379,11 @@ def build_parser() -> argparse.ArgumentParser:
     bridge_status.add_argument("--json", action="store_true")
     bridge_doctor = bridge_subparsers.add_parser("doctor")
     bridge_doctor.add_argument("--json", action="store_true")
+    bridge_subparsers.add_parser(
+        "serve",
+        help="run the visible-bridge MCP server on stdio "
+        "(used by the installed plugin manifest)",
+    )
     bridge_subparsers.add_parser("unbind")
     bridge_uninstall = bridge_subparsers.add_parser("uninstall")
     bridge_uninstall.add_argument("--dry-run", action="store_true")
@@ -684,6 +689,34 @@ def _bridge_plugin_manager() -> BridgePluginManager:
         codex_bin=resolve_codex_bin(),
         marketplace_root=SOURCE_ROOT,
     )
+
+
+def _bridge_serve() -> int:
+    """Run the visible-bridge MCP server on stdio.
+
+    The plugin ``.mcp.json`` points here so the server executes under the
+    same environment that installed LoopWeave instead of a platform-specific
+    ``python3`` lookup (Windows venvs provide ``python``, not ``python3``).
+    The server script also receives ``LOOPWEAVE_SOURCE_ROOT`` so it resolves
+    the package source from the canonical checkout even when the plugin is
+    loaded from a copied marketplace cache.
+    """
+    import runpy
+
+    server = (
+        SOURCE_ROOT
+        / "plugins"
+        / "loopweave-visible-bridge"
+        / "server"
+        / "bridge_server.py"
+    )
+    if not server.is_file():
+        raise BridgePluginError(
+            "visible-bridge server script not found: {}".format(server)
+        )
+    os.environ["LOOPWEAVE_SOURCE_ROOT"] = str(SOURCE_ROOT)
+    runpy.run_path(str(server), run_name="__main__")
+    return 0
 
 
 def _process_identity_is_still_live(run: RunRecord) -> bool:
@@ -1411,6 +1444,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 }
                 print(json.dumps(payload) if args.json else payload)
                 return 0
+            if args.bridge_command == "serve":
+                return _bridge_serve()
             if args.bridge_command == "unbind":
                 controller.unbind()
                 print("visible-review bridge: unbound")
