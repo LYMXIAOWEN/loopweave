@@ -70,6 +70,50 @@ def _console_size() -> tuple[int, int]:
     return (int(size.lines), int(size.columns))
 
 
+# msvcrt reports extended keys (arrows, editing keys, F1-F10) as a lead
+# byte ("\x00" or "\xe0") plus a scan-code byte. ConPTY consumes the same
+# ANSI escape sequences the control channel already uses, so translate the
+# two-character sequences before writing them to the pseudo console.
+_CONSOLE_EXTENDED_KEYS: dict[str, str] = {
+    "\x00H": "\x1b[A",  # Up
+    "\xe0H": "\x1b[A",
+    "\x00P": "\x1b[B",  # Down
+    "\xe0P": "\x1b[B",
+    "\x00M": "\x1b[C",  # Right
+    "\xe0M": "\x1b[C",
+    "\x00K": "\x1b[D",  # Left
+    "\xe0K": "\x1b[D",
+    "\x00G": "\x1b[H",  # Home
+    "\xe0G": "\x1b[H",
+    "\x00O": "\x1b[F",  # End
+    "\xe0O": "\x1b[F",
+    "\x00I": "\x1b[5~",  # Page Up
+    "\xe0I": "\x1b[5~",
+    "\x00Q": "\x1b[6~",  # Page Down
+    "\xe0Q": "\x1b[6~",
+    "\x00R": "\x1b[2~",  # Insert
+    "\xe0R": "\x1b[2~",
+    "\x00S": "\x1b[3~",  # Delete
+    "\xe0S": "\x1b[3~",
+    "\x00;": "\x1bOP",  # F1
+    "\x00<": "\x1bOQ",  # F2
+    "\x00=": "\x1bOR",  # F3
+    "\x00>": "\x1bOS",  # F4
+    "\x00?": "\x1b[15~",  # F5
+    "\x00@": "\x1b[17~",  # F6
+    "\x00A": "\x1b[18~",  # F7
+    "\x00B": "\x1b[19~",  # F8
+    "\x00C": "\x1b[20~",  # F9
+    "\x00D": "\x1b[21~",  # F10
+}
+
+
+def _translate_console_key(sequence: str) -> str:
+    """Map an msvcrt extended-key sequence to the ANSI escape sequence
+    ConPTY expects; unrecognized input passes through unchanged."""
+    return _CONSOLE_EXTENDED_KEYS.get(sequence, sequence)
+
+
 class WindowsConPtyHost(TerminalHost):
     """ConPTY-based managed-session boundary for ``win32``."""
 
@@ -118,6 +162,7 @@ class WindowsConPtyHost(TerminalHost):
         self._last_output_monotonic: float | None = None
         self._console_handler_ref: Any | None = None
         self._server_pipe_handle: int | None = None
+        self._last_console_size: tuple[int, int] | None = None
 
     # ------------------------------------------------------------------
     # TerminalHost interface
@@ -128,6 +173,7 @@ class WindowsConPtyHost(TerminalHost):
             raise WindowsHostError("windows host already started")
         self.run_dir.mkdir(parents=True, exist_ok=True)
         rows, cols = _console_size()
+        self._last_console_size = (rows, cols)
         appname = _resolve_command(self.command)
         cmdline = (
             subprocess.list2cmdline(self.command[1:])
@@ -204,26 +250,44 @@ class WindowsConPtyHost(TerminalHost):
             return self._wait()
         import msvcrt
 
-        try:
-            while self._is_alive() and not self._stop_event.is_set():
-                if msvcrt.kbhit():
-                    char = msvcrt.getwch()
-                    # Function keys and arrows arrive as a two-character
-                    # sequence (lead byte + scan code).
-                    if char in ("\x00", "\xe0"):
-                        try:
-                            char += msvcrt.getwch()
-                        except Exception:
-                            pass
+        last_size_check = 0.0
+        while self._is_alive() and not self._stop_event.is_set():
+            if msvcrt.kbhit():
+                char = msvcrt.getwch()
+                # Function keys and arrows arrive as a two-character
+                # sequence (lead byte + scan code).
+                if char in ("\x00", "\xe0"):
                     try:
-                        self.send_input(char)
-                    except WindowsHostError:
-                        break
-                else:
-                    time.sleep(0.01)
-        finally:
-            pass
+                        char += msvcrt.getwch()
+                    except Exception:
+                        pass
+                    char = _translate_console_key(char)
+                try:
+                    self.send_input(char)
+                except WindowsHostError:
+                    break
+            now = time.monotonic()
+            if now - last_size_check >= 0.2:
+                last_size_check = now
+                self._sync_console_size()
+            else:
+                time.sleep(0.01)
         return self._wait()
+
+    def _sync_console_size(self) -> None:
+        """Follow the host console size while running in the foreground.
+
+        Windows delivers no SIGWINCH, so poll the console size and push
+        changes into ConPTY for terminal TUIs that reflow on resize.
+        """
+        pty = self._pty
+        if pty is None:
+            return
+        rows, cols = _console_size()
+        if (rows, cols) == self._last_console_size:
+            return
+        self._last_console_size = (rows, cols)
+        self.resize(rows, cols)
 
     def resize(self, rows: int, cols: int) -> None:
         pty = self._pty
@@ -579,7 +643,7 @@ class WindowsConPtyHost(TerminalHost):
 
     def _enforce_stop(self, pty: Any) -> None:
         # Short graceful window for the control-channel stop path: the CLI
-        # stop command verifies process exit within 2 seconds
+        # stop command verifies process exit within 6 seconds on Windows
         # (STOP_VERIFY_TIMEOUT_SECONDS), so Ctrl+C gets a brief chance and
         # then process-tree termination guarantees the deadline is met.
         deadline = time.monotonic() + 0.8

@@ -31,6 +31,7 @@ class _FakePTY:
         self._fake_pid = 424242
         self.alive = False
         self.written: list[str] = []
+        self.sizes: list[tuple[int, int]] = []
 
     @property
     def pid(self) -> int:
@@ -48,7 +49,7 @@ class _FakePTY:
         return len(to_write)
 
     def set_size(self, cols: int, rows: int) -> None:
-        pass
+        self.sizes.append((cols, rows))
 
     def isalive(self) -> bool:
         return self.alive
@@ -166,6 +167,81 @@ class WindowsHostContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("terminal_resized", events)
+        host.stop()
+
+    def test_translate_console_key_maps_extended_keys_and_passthrough(
+        self,
+    ) -> None:
+        from loopweave.windows_terminal_host import _translate_console_key
+
+        self.assertEqual(_translate_console_key("\xe0H"), "\x1b[A")
+        self.assertEqual(_translate_console_key("\x00H"), "\x1b[A")
+        self.assertEqual(_translate_console_key("\xe0P"), "\x1b[B")
+        self.assertEqual(_translate_console_key("\xe0M"), "\x1b[C")
+        self.assertEqual(_translate_console_key("\xe0K"), "\x1b[D")
+        self.assertEqual(_translate_console_key("\x00G"), "\x1b[H")
+        self.assertEqual(_translate_console_key("\xe0O"), "\x1b[F")
+        self.assertEqual(_translate_console_key("\x00I"), "\x1b[5~")
+        self.assertEqual(_translate_console_key("\x00S"), "\x1b[3~")
+        self.assertEqual(_translate_console_key("\x00;"), "\x1bOP")
+        self.assertEqual(_translate_console_key("a"), "a")
+        self.assertEqual(_translate_console_key("\x1b"), "\x1b")
+
+    def test_sync_console_size_pushes_change_and_records_event(self) -> None:
+        host = _make_host(self.root)
+        with mock.patch(
+            "loopweave.windows_terminal_host._console_size",
+            return_value=(24, 80),
+        ):
+            host.start()
+        pty = host._pty
+        assert pty is not None
+        with mock.patch(
+            "loopweave.windows_terminal_host._console_size",
+            return_value=(40, 120),
+        ):
+            host._sync_console_size()
+        self.assertEqual(pty.sizes, [(120, 40)])
+        events = (self.root / "run" / "terminal-events.jsonl").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('"rows": 40', events)
+        self.assertIn('"columns": 120', events)
+        # An unchanged console size must not resize or record again.
+        with mock.patch(
+            "loopweave.windows_terminal_host._console_size",
+            return_value=(40, 120),
+        ):
+            host._sync_console_size()
+        self.assertEqual(pty.sizes, [(120, 40)])
+        host.stop()
+
+    @unittest.skipUnless(sys.platform == "win32", "msvcrt required")
+    def test_run_foreground_translates_extended_keys_and_forwards_text(
+        self,
+    ) -> None:
+        host = _make_host(self.root)
+        host.start()
+        pty = host._pty
+        assert pty is not None
+        raw_queue = ["\xe0", "H", "a", "\x00", "M"]
+
+        def fake_alive() -> bool:
+            if not raw_queue:
+                pty.alive = False
+                return False
+            return True
+
+        with (
+            mock.patch.object(sys.stdin, "isatty", return_value=True),
+            mock.patch("msvcrt.kbhit", side_effect=lambda: bool(raw_queue)),
+            mock.patch("msvcrt.getwch", side_effect=lambda: raw_queue.pop(0)),
+            mock.patch("time.sleep", lambda _: None),
+            mock.patch.object(host, "_is_alive", side_effect=fake_alive),
+        ):
+            exit_code = host.run_foreground()
+        self.assertEqual(pty.written, ["\x1b[A", "a", "\x1b[C"])
+        self.assertEqual(exit_code, 0)
         host.stop()
 
 
@@ -341,6 +417,97 @@ class WindowsConPtyRealTests(unittest.TestCase):
             identity_pid, start = host.process_identity()
             self.assertEqual(identity_pid, pid)
             self.assertIn("2026", start)
+        finally:
+            host.stop()
+
+    def test_conpty_translates_ansi_arrow_sequence_to_up_key(self) -> None:
+        """Acceptance item 5 (automated layer): writing the ANSI Up-arrow
+        sequence into ConPTY produces a real Up key event in the child."""
+        log = self.root / "arrow.log"
+        log_s = str(log).replace("\\", "\\\\")
+        fixture = self._fixture(
+            "\n".join(
+                [
+                    "import msvcrt, time",
+                    f"out = open(r'{log_s}', 'w', encoding='utf-8')",
+                    "deadline = time.monotonic() + 8",
+                    "while time.monotonic() < deadline and not msvcrt.kbhit():",
+                    "    time.sleep(0.05)",
+                    "if msvcrt.kbhit():",
+                    "    first = msvcrt.getwch()",
+                    "    second = msvcrt.getwch() if first in ('\\x00', '\\xe0') else ''",
+                    "    out.write('GOT=' + repr(first) + ':' + repr(second) + '\\n')",
+                    "else:",
+                    "    out.write('NO_KEY\\n')",
+                    "out.flush()",
+                ]
+            )
+        )
+        host = self._host([sys.executable, "-u", str(fixture)])
+        try:
+            host.start()
+            time.sleep(1.5)
+            from loopweave.control_transport import send_control_message
+
+            send_control_message(
+                host.pipe_name,
+                {"token": "secret-token", "action": "send", "text": "\x1b[A"},
+                timeout=3.0,
+            )
+            content = self._wait_for_text(log, "GOT=")
+            # msvcrt returns the extended-key lead byte U+00E0 followed by
+            # the Up scan code 'H' (0x48); repr renders U+00E0 as "à".
+            self.assertIn("'à'", content)
+            self.assertIn("'H'", content)
+        finally:
+            host.stop()
+
+    def test_real_resize_reaches_child_console(self) -> None:
+        """Acceptance item 7 (automated layer): a resize on the host
+        ConPTY is observed by the child console."""
+        log = self.root / "size.log"
+        log_s = str(log).replace("\\", "\\\\")
+        fixture = self._fixture(
+            "\n".join(
+                [
+                    "import ctypes, ctypes.wintypes, time",
+                    "k32 = ctypes.windll.kernel32",
+                    "handle = k32.GetStdHandle(-11)",
+                    "class CSBI(ctypes.Structure):",
+                    "    _fields_ = [",
+                    "        ('dwSize', ctypes.wintypes._COORD),",
+                    "        ('dwCursorPosition', ctypes.wintypes._COORD),",
+                    "        ('wAttributes', ctypes.wintypes.WORD),",
+                    "        ('srWindow', ctypes.wintypes.SMALL_RECT),",
+                    "        ('dwMaximumWindowSize', ctypes.wintypes._COORD),",
+                    "    ]",
+                    "def console_size():",
+                    "    info = CSBI()",
+                    "    if not k32.GetConsoleScreenBufferInfo(handle, ctypes.byref(info)):",
+                    "        return (0, 0)",
+                    "    return (",
+                    "        info.srWindow.Right - info.srWindow.Left + 1,",
+                    "        info.srWindow.Bottom - info.srWindow.Top + 1,",
+                    "    )",
+                    f"out = open(r'{log_s}', 'w', encoding='utf-8')",
+                    "deadline = time.monotonic() + 10",
+                    "while time.monotonic() < deadline:",
+                    "    cols, rows = console_size()",
+                    "    out.write(f'{cols}x{rows}\\n'); out.flush()",
+                    "    if cols == 120 and rows == 40:",
+                    "        out.write('RESIZED\\n'); out.flush()",
+                    "        break",
+                    "    time.sleep(0.2)",
+                ]
+            )
+        )
+        host = self._host([sys.executable, "-u", str(fixture)])
+        try:
+            host.start()
+            time.sleep(1.5)
+            host.resize(40, 120)
+            content = self._wait_for_text(log, "RESIZED", timeout=15.0)
+            self.assertIn("120x40", content)
         finally:
             host.stop()
 
